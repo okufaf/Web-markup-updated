@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agriculture Vision — TTZ</title>
+<link rel="icon" href="69af4484-5238-422b-9721-53157a9a6e2d.png" type="image/png">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+
+<link rel="stylesheet" href="style.css?v=20260816-right-seg">
+</head>
+<body>
+
+<!-- ======================================================= -->
+<!-- ЭКРАН 1: ВХОД / РЕГИСТРАЦИЯ                              -->
+<!-- ======================================================= -->
+<div id="screen-auth" class="auth-container">
+
+    <div class="auth-left">
+        <div class="glow-bg"></div>
+        <div class="left-content">
+
+            <div class="brand">
+                <img src="69af4484-5238-422b-9721-53157a9a6e2d.png" alt="Agriculture Vision" class="logo-image auth-login-logo">
+                <div class="brand-text">
+                    <h1>AGRICULTURE <span>VISION</span></h1>
+                    <p>ООО «ТЕХНОЛОГИИ ЗЕМЛЕДЕЛИЯ» — TTZ</p>
+                </div>
+            </div>
+
+            <div id="text-login" class="promo-text active">
+                <h2>Распознавание<br>полей на <span class="highlight">изображениях</span></h2>
+                <p>Платформа автоматической сегментации и<br>классификации сельскохозяйственных<br>угодий Беларуси на основе аэроснимков.</p>
+            </div>
+
+            <div id="text-register" class="promo-text">
+                <h2>Автоматизируйте<br>работу с полями <span class="highlight">сегодня</span></h2>
+                <p>Загружайте снимки с dzz.by, получайте<br>векторные полигоны полей с классификацией<br>культур и экспортируйте в SHP, KML, GeoJSON.</p>
+            </div>
+
+            <div class="stats">
+                <div class="stat-item"><h3>10 000</h3><p>ГА/МЕСЯЦ</p></div>
+                <div class="stat-item"><h3>6</h3><p>КЛАССОВ ОБЪЕКТОВ</p></div>
+                <div class="stat-item"><h3>88%</h3><p>ТОЧНОСТЬ</p></div>
+            </div>
+
+            <div class="left-footer">© 2026 ООО «Технологии Земледелия» (TTZ) · Все права защищены</div>
+        </div>
+    </div>
+
+    <div class="auth-right">
+
+        <!-- ФОРМА ВХОДА -->
+        <div id="form-login" class="form-wrapper active">
+            <div class="form-header text-center">
+
+                <h2>Добро пожаловать</h2>
+                <p>Войдите в аккаунт, чтобы начать работу</p>
+            </div>
+
+            <form id="loginForm" onsubmit="return handleLogin(event)">
+                <div class="input-group">
+                    <label>EMAIL</label>
+                    <input type="email" id="login-email" required>
+                </div>
+                <div class="input-group">
+                    <label>ПАРОЛЬ</label>
+                    <div class="password-field">
+                        <input type="password" id="login-password" required autocomplete="current-password">
+                        <button type="button" class="password-toggle" aria-label="Показать пароль" title="Показать пароль"></button>
+                    </div>
+                </div>
+
+                <div class="form-options">
+                    <label class="checkbox-container">
+                        <input type="checkbox" id="login-remember" checked>
+                        <span class="checkmark"></span>
+                        Запомнить меня
+                    </label>
+                    <a href="#" class="forgot-password" onclick="return false;">Забыли пароль?</a>
+                </div>
+
+                <div id="login-error" class="form-error">Неверный email или пароль.</div>
+
+                <button type="submit" class="btn btn-dark">Войти</button>
+            </form>
+
+            <div class="divider"><span>или</span></div>
+
+            <div class="switch-form">
+                Нет аккаунта? <a href="#" onclick="toggleMode('register'); return false;">Зарегистрироваться</a>
+            </div>
+            <div class="right-footer">Платформа TTZ — Agriculture Vision</div>
+        </div>
+
+        <!-- ФОРМА РЕГИСТРАЦИИ -->
+        <div id="form-register" class="form-wrapper">
+            <div class="form-header text-left">
+                <h2>Создать аккаунт</h2>
+                <p>Заполните данные — доступ откроется<br>сразу после регистрации</p>
+            </div>
+
+            <form id="registerForm" onsubmit="return handleRegister(event)">
+                <div class="input-row">
+                    <div class="input-group">
+                        <label>ИМЯ</label>
+                        <input type="text" id="reg-firstname" placeholder="Иван" required>
+                    </div>
+                    <div class="input-group">
+                        <label>ФАМИЛИЯ</label>
+                        <input type="text" id="reg-lastname" placeholder="Петров" required>
+                    </div>
+                </div>
+
+                <div class="input-group">
+                    <label>EMAIL</label>
+                    <input type="email" id="reg-email" placeholder="you@company.by" required>
+                </div>
+
+                <div class="input-group">
+                    <label>ОРГАНИЗАЦИЯ</label>
+                    <input type="text" id="reg-org" placeholder="ОАО «АгроПлюс»" required>
+                </div>
+
+                <div class="input-group">
+                    <label>РОЛЬ</label>
+                    <input type="text" id="reg-role" placeholder="ГИС-специалист" required>
+                </div>
+
+                <div class="input-row">
+                    <div class="input-group">
+                        <label>ПАРОЛЬ</label>
+                        <div class="password-field">
+                            <input type="password" id="reg-password" placeholder="8+ симв., Aa и спецсимвол" minlength="8" required autocomplete="new-password">
+                            <button type="button" class="password-toggle" aria-label="Показать пароль" title="Показать пароль"></button>
+                        </div>
+                    </div>
+                    <div class="input-group">
+                        <label>ПОВТОРИТЕ ПАРОЛЬ</label>
+                        <div class="password-field">
+                            <input type="password" id="reg-password2" placeholder="••••••••" minlength="8" required autocomplete="new-password">
+                            <button type="button" class="password-toggle" aria-label="Показать пароль" title="Показать пароль"></button>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="register-error" class="form-error">Не удалось создать аккаунт.</div>
+
+                <div class="form-options mb-20">
+                    <label class="checkbox-container text-sm">
+                        <input type="checkbox" required checked>
+                        <span class="checkmark"></span>
+                        <span>Я принимаю <a href="#" class="link-red" onclick="return false;">условия использования</a> и <a href="#" class="link-red" onclick="return false;">политику конфиденциальности</a> ООО «Технологии Земледелия»</span>
+                    </label>
+                </div>
+
+                <button type="submit" class="btn btn-red">Зарегистрироваться</button>
+            </form>
+
+            <div class="divider"><span>или</span></div>
+
+            <div class="switch-form">
+                Уже есть аккаунт? <a href="#" onclick="toggleMode('login'); return false;">Войти</a>
+            </div>
+            <div class="right-footer">Платформа TTZ — Agriculture Vision</div>
+        </div>
+
+    </div>
+</div>
+
+<!-- ======================================================= -->
+<!-- ЭКРАН 2: ПРИЛОЖЕНИЕ (КАРТА / АККАУНТ)                    -->
+<!-- ======================================================= -->
+<div id="screen-app" class="app-shell">
+
+    <header class="topbar">
+        <div class="topbar-left">
+
+
+            <span class="brand-name">AGRICULTURE <span class="brand-name2">VISION</span></span>
+
+            <nav class="top-nav" aria-hidden="true"></nav>
+        </div>
+        <div class="topbar-right">
+            <span class="company-name">ООО «ТЕХНОЛОГИИ ЗЕМЛЕДЕЛИЯ» · TTZ</span>
+            <span class="status-online" id="status-online">• Онлайн</span>
+            <button class="topbar-logout" type="button" onclick="handleLogout()" title="Выйти из аккаунта">
+                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+                Выйти
+            </button>
+        </div>
+    </header>
+
+    <!-- ---------------- ВКЛАДКА: КАРТА ---------------- -->
+    <main id="view-map" class="view-container active">
+
+        <aside class="sidebar-icons">
+            <div class="icon-btn icon-btn-account-top" id="sidebar-account-btn" onclick="switchMainTab('account')" title="Аккаунт">
+                <div class="sidebar-avatar" id="sidebar-avatar">AV</div>
+                <span class="icon-tip">Аккаунт</span>
+            </div>
+
+            <div class="sidebar-divider"></div>
+
+            <div class="icon-btn" data-panel="upload" onclick="switchSidebar('upload', event)" title="Загрузка снимка">
+                <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                <span class="icon-tip">Загрузка и обработка GeoTIFF</span>
+            </div>
+            <div class="icon-btn active" data-panel="layers" onclick="switchSidebar('layers', event)" title="Слои карты">
+                <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 12 12 17 22 12"></polyline><polyline points="2 17 12 22 22 17"></polyline></svg>
+                <span class="icon-tip">Слои карты — показать, скрыть, создать</span>
+            </div>
+            <div class="icon-btn" data-panel="export" onclick="switchSidebar('export', event)" title="Экспорт">
+                <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none"><path d="M4 12v6a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"></path><polyline points="16 6 12 2 8 6"></polyline><line x1="12" y1="2" x2="12" y2="15"></line></svg>
+                <span class="icon-tip">Экспорт слоёв в SHP / KML / GeoJSON / SVG</span>
+            </div>
+            <div class="icon-btn" data-panel="settings" onclick="switchSidebar('settings', event)" title="Настройки">
+                <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none"><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg>
+                <span class="icon-tip">Настройки распознавания и карты</span>
+            </div>
+        </aside>
+
+        <div class="sidebar-panel-wrap" id="sidebar-panel-wrap">
+        <aside class="sidebar-panel" id="sidebar-panel">
+            <div class="sidebar-resizer" id="sidebar-resizer" title="Потяните, чтобы изменить ширину"></div>
+
+            <!-- ПАНЕЛЬ: СЛОИ -->
+            <div id="panel-layers" class="panel-content active">
+                <div class="panel-header">СЛОИ КАРТЫ</div>
+                <input type="text" class="search-input" id="layer-search" placeholder="Поиск слоя..." oninput="filterLayers(this.value)">
+
+                <button class="mini-btn" onclick="toggleCreateLayerForm()">+ Создать слой</button>
+                <button class="mini-btn" onclick="createFolder()">+ Создать папку</button>
+
+                <div class="layer-group">
+                    <div class="layer-group-title layer-group-toggle" onclick="toggleLayerGroup('categories-group')">
+                        <span>КАТЕГОРИИ ОБЪЕКТОВ</span>
+                        <span class="badge" id="layers-count-badge">0 полигонов</span>
+                        <span class="collapse-icon" id="categories-group-icon">▾</span>
+                    </div>
+                    <div id="categories-group">
+                    <div id="folders-list"></div>
+                    <div id="layers-list"></div>
+                    </div>
+                </div>
+
+                <label class="settings-toggle map-display-toggle">
+                    <input type="checkbox" id="opt-field-labels" checked onchange="setMapDisplayOption('labels', this.checked)">
+                    <span class="checkmark"></span>
+                    <span>Подписи объектов на карте</span>
+                </label>
+                <label class="settings-toggle map-display-toggle">
+                    <input type="checkbox" id="opt-field-coords" checked onchange="setMapDisplayOption('coords', this.checked)">
+                    <span class="checkmark"></span>
+                    <span>Координаты вершин</span>
+                </label>
+
+                <div id="field-detail-panel" class="field-detail-panel" style="display:none;">
+                    <div class="field-detail-header" onclick="toggleFieldDetailPanel()">
+                        <span>СВОЙСТВА ОБЪЕКТА</span>
+                        <span class="collapse-icon" id="field-detail-icon">▾</span>
+                    </div>
+                    <div id="field-detail-body">
+                    <div class="input-group">
+                        <label>НАЗВАНИЕ ОБЪЕКТА</label>
+                        <input type="text" id="field-name-input" class="search-input" onchange="saveFieldName()">
+                    </div>
+                    <div class="field-area">Площадь: <strong id="field-area-value">—</strong></div>
+                    <div class="field-crop-result" id="field-crop-result"></div>
+                    <div class="crop-table-wrap">
+                        <table class="crop-table" id="crop-table">
+                            <thead><tr><th>Сельхозкультура</th><th>Вероятность</th></tr></thead>
+                            <tbody id="crop-table-body"></tbody>
+                        </table>
+                    </div>
+                    <div class="field-actions">
+                        <button class="mini-btn mini-btn-red" onclick="confirmFieldCrop()">Подтвердить</button>
+                        <button class="mini-btn" onclick="manualFieldCrop()">Изменить вручную</button>
+                    </div>
+                    </div>
+                </div>
+
+                <div class="layer-group">
+                    <div class="layer-group-title">ЭТАЛОННЫЕ СЛОИ</div>
+                    <label class="import-btn">
+                        Импорт SHP (.zip) / GeoJSON...
+                        <input type="file" id="import-file-input" accept=".json,.geojson,.zip" style="display:none" onchange="importLayerFile(this.files[0])">
+                    </label>
+                </div>
+
+            </div>
+
+            <!-- ПАНЕЛЬ: ЗАГРУЗКА -->
+            <div id="panel-upload" class="panel-content">
+                <div class="panel-header">ЗАГРУЗКА И ОБРАБОТКА СНИМКА</div>
+                <label class="drop-zone">
+                    <svg viewBox="0 0 24 24" width="24" height="24" stroke="#e14059" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                    <p>Перетащите GeoTIFF или <span class="text-highlight">выберите файл</span></p>
+                    <small>Аэро · Космо · dzz.by</small>
+                    <input type="file" id="upload-file-input" accept=".tif,.tiff,image/*" style="display:none" onchange="handleUploadFile(this.files[0])">
+                </label>
+                <div id="upload-status" class="upload-status"></div>
+                <div class="upload-progress" id="upload-progress" style="display:none;">
+                    <div class="upload-progress-bar" id="upload-progress-bar"></div>
+                </div>
+                <button id="upload-process-btn" class="mini-btn mini-btn-red" disabled onclick="startUploadProcessing()">Запустить обработку</button>
+            </div>
+
+            <!-- ПАНЕЛЬ: НАСТРОЙКИ -->
+            <div id="panel-settings" class="panel-content">
+                <div class="panel-header">НАСТРОЙКИ</div>
+                <p class="panel-hint">Типы объектов для распознавания, отображение карты и подложки (включая dzz.by).</p>
+
+                <div class="settings-section-title">Сегментация границ</div>
+                <label class="settings-toggle">
+                    <input type="checkbox" id="opt-crops" checked>
+                    <span class="checkmark"></span>
+                    <span>Участки с культурными растениями</span>
+                </label>
+                <label class="settings-toggle">
+                    <input type="checkbox" id="opt-double-sow" checked>
+                    <span class="checkmark"></span>
+                    <span>Двойной посев</span>
+                </label>
+                <label class="settings-toggle">
+                    <input type="checkbox" id="opt-withering" checked>
+                    <span class="checkmark"></span>
+                    <span>Усыхание посева</span>
+                </label>
+                <label class="settings-toggle">
+                    <input type="checkbox" id="opt-edge-strip">
+                    <span class="checkmark"></span>
+                    <span>Краевая полоса</span>
+                </label>
+                <label class="settings-toggle">
+                    <input type="checkbox" id="opt-flood">
+                    <span class="checkmark"></span>
+                    <span>Водоём / затопление</span>
+                </label>
+                <label class="settings-toggle">
+                    <input type="checkbox" id="opt-watercourse">
+                    <span class="checkmark"></span>
+                    <span>Водоток</span>
+                </label>
+                <label class="settings-toggle">
+                    <input type="checkbox" id="opt-weeds">
+                    <span class="checkmark"></span>
+                    <span>Скопление сорняков</span>
+                </label>
+
+                <div class="settings-section-title">Детекция точечных объектов</div>
+                <label class="settings-toggle">
+                    <input type="checkbox" id="opt-points" checked>
+                    <span class="checkmark"></span>
+                    <span>Деревья и опоры (точки)</span>
+                </label>
+                <label class="settings-toggle">
+                    <input type="checkbox" id="opt-seeder-skip">
+                    <span class="checkmark"></span>
+                    <span>Пропуск сеялки</span>
+                </label>
+
+                <div class="settings-section-title">Аномалии посева</div>
+                <label class="settings-toggle">
+                    <input type="checkbox" id="opt-nutrition">
+                    <span class="checkmark"></span>
+                    <span>Дефицит питания</span>
+                </label>
+                <label class="settings-toggle">
+                    <input type="checkbox" id="opt-hail">
+                    <span class="checkmark"></span>
+                    <span>Повреждение бурей</span>
+                </label>
+
+                <div class="settings-section-title">Отображение карты</div>
+                <div class="settings-block-title">Размер точек: <span id="point-size-value">5</span> px</div>
+                <input type="range" id="opt-point-size" min="3" max="12" value="5" class="settings-range" oninput="document.getElementById('point-size-value').innerText=this.value">
+                <div class="settings-block-title">Ширина линий: <span id="line-width-value">2</span> px</div>
+                <input type="range" id="opt-line-width" min="1" max="6" value="2" class="settings-range" oninput="document.getElementById('line-width-value').innerText=this.value">
+                <div class="settings-block-title">Прозрачность заливки: <span id="fill-opacity-value">35</span>%</div>
+                <input type="range" id="opt-fill-opacity" min="5" max="90" value="35" class="settings-range" oninput="document.getElementById('fill-opacity-value').innerText=this.value">
+                <div class="settings-block-title">Цвет координат</div>
+                <input type="color" id="opt-coord-color" value="#ff3366" class="color-input">
+                <div class="settings-block-title">Подложка</div>
+                <select id="opt-basemap" class="search-input" onchange="onBasemapSelectChange(this.value)">
+                    <option value="satellite">Спутник (Esri)</option>
+                    <option value="scheme">Схема (OSM)</option>
+                    <option value="dzz">Ортофото dzz.by (макс. разрешение)</option>
+                    <option value="custom">Дополнительная подложка (URL)</option>
+                </select>
+
+                <div id="basemap-dzz-block" class="basemap-extra-block">
+                    <div class="settings-section-title">Доступ к dzz.by</div>
+                    <p class="panel-hint">Закрытый ресурс с тайлами максимального разрешения. Укажите логин и пароль для загрузки подложки.</p>
+                    <div class="settings-block-title">Логин dzz.by</div>
+                    <input type="text" id="opt-dzz-login" class="search-input" autocomplete="username" placeholder="логин">
+                    <div class="settings-block-title">Пароль dzz.by</div>
+                    <div class="password-field settings-password-field">
+                        <input type="password" id="opt-dzz-password" class="search-input" autocomplete="current-password" placeholder="пароль">
+                        <button type="button" class="password-toggle" aria-label="Показать пароль" title="Показать пароль"></button>
+                    </div>
+                    <div class="settings-block-title">URL шаблон тайлов</div>
+                    <input type="text" id="opt-dzz-url" class="search-input" placeholder="https://www.dzz.by/.../{z}/{x}/{y}.jpg">
+                    <p class="panel-hint">Используйте {z}/{x}/{y}. Для Basic Auth достаточно логина и пароля выше; при необходимости подставьте {user} и {pass} в URL.</p>
+                </div>
+
+                <div id="basemap-custom-block" class="basemap-extra-block" style="display:none;">
+                    <div class="settings-section-title">Дополнительная подложка</div>
+                    <p class="panel-hint">Подключите свой XYZ/WMTS-шаблон тайлов для работы системы поверх сторонней подложки.</p>
+                    <div class="settings-block-title">Название</div>
+                    <input type="text" id="opt-custom-basemap-name" class="search-input" placeholder="Моя подложка">
+                    <div class="settings-block-title">URL шаблон тайлов</div>
+                    <input type="text" id="opt-custom-basemap-url" class="search-input" placeholder="https://example.com/tiles/{z}/{x}/{y}.png">
+                    <div class="settings-block-title">Логин (если нужен)</div>
+                    <input type="text" id="opt-custom-basemap-login" class="search-input" autocomplete="off" placeholder="необязательно">
+                    <div class="settings-block-title">Пароль (если нужен)</div>
+                    <div class="password-field settings-password-field">
+                        <input type="password" id="opt-custom-basemap-password" class="search-input" autocomplete="new-password" placeholder="необязательно">
+                        <button type="button" class="password-toggle" aria-label="Показать пароль" title="Показать пароль"></button>
+                    </div>
+                </div>
+
+                <button class="mini-btn mini-btn-red" style="margin-top:12px" onclick="saveSettings()">Сохранить настройки</button>
+            </div>
+
+            <!-- ПАНЕЛЬ: ЭКСПОРТ -->
+            <div id="panel-export" class="panel-content">
+                <div class="panel-header">ЭКСПОРТ СЛОЁВ</div>
+                <p class="panel-hint">Экспортируются все видимые распознанные и импортированные объекты карты.</p>
+
+                <div class="settings-block-title">Формат файла</div>
+                <select id="export-format" class="search-input">
+                    <option value="geojson">GeoJSON (.geojson)</option>
+                    <option value="kml">KML (.kml)</option>
+                    <option value="shp">Shapefile (.zip)</option>
+                    <option value="svg">SVG (.svg)</option>
+                </select>
+
+                <button class="mini-btn mini-btn-red" style="margin-top:12px" onclick="exportLayers()">Экспортировать</button>
+                <div id="export-status" class="upload-status"></div>
+            </div>
+
+        </aside>
+        <button type="button" class="sidebar-edge-toggle" id="sidebar-edge-toggle" onclick="toggleSidebarPanel()" title="Свернуть панель" aria-expanded="true">
+            <svg class="sidebar-edge-arrow" viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="2.5" fill="none" aria-hidden="true"><polyline points="15 6 9 12 15 18"></polyline></svg>
+        </button>
+        </div>
+
+        <div class="map-area" id="map-area">
+
+            <!-- Отмена / повтор — слева сверху, не мешают карте -->
+            <div class="map-top-actions">
+                <button type="button" class="map-action-btn" onclick="undoLast()" title="Отменить (Ctrl+Z)">
+                    <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M9 15H4v-5"></path><path d="M4 15c2.8-4.5 8-6.5 13-4.2l3 1.7"></path></svg>
+                </button>
+                <button type="button" class="map-action-btn" onclick="redoLast()" title="Повторить (Ctrl+Shift+Z)">
+                    <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M15 15h5v-5"></path><path d="M20 15c-2.8-4.5-8-6.5-13-4.2l-3 1.7"></path></svg>
+                </button>
+            </div>
+
+            <!-- Справа: сегментация сверху, инструменты ниже -->
+            <div class="map-right-stack">
+                <div class="map-seg-panel" id="map-seg-panel">
+                    <div class="map-seg-title">Сегментация</div>
+                    <div class="map-seg-row">
+                        <button type="button" class="map-seg-btn" id="map-btn-aoi" onclick="startAoiSelection()">Выделить область</button>
+                        <button type="button" class="map-seg-btn map-seg-btn-ghost" id="map-btn-clear-aoi" onclick="clearAoiSelection()">Сброс</button>
+                    </div>
+                    <div class="map-seg-row map-seg-arch">
+                        <label class="map-seg-chip"><input type="radio" name="seg-architecture" value="yolo" checked onchange="onSegArchitectureChange()"><span>YOLO</span></label>
+                        <label class="map-seg-chip"><input type="radio" name="seg-architecture" value="segformer" onchange="onSegArchitectureChange()"><span>SegFormer</span></label>
+                    </div>
+                    <div class="map-seg-threshold">
+                        <span>Порог <strong id="seg-threshold-value">40%</strong></span>
+                        <input type="range" id="seg-threshold" min="5" max="95" value="40" step="5" oninput="onSegThresholdInput(this.value)">
+                    </div>
+                    <div class="map-seg-row">
+                        <button type="button" class="map-seg-btn map-seg-btn-primary" id="btn-segment-yolo" onclick="runSegmentation('yolo')">Сегментировать YOLO</button>
+                        <button type="button" class="map-seg-btn map-seg-btn-secondary" id="btn-segment-segformer" onclick="runSegmentation('segformer')">SegFormer</button>
+                    </div>
+                    <div class="map-seg-hint" id="map-seg-status">Выделите область на карте или сегментируйте весь кадр</div>
+                    <div class="map-seg-progress" id="map-seg-progress" style="display:none;"><div id="map-seg-progress-bar"></div></div>
+                </div>
+
+                <div class="map-right-tools">
+                    <div class="map-toolbar" id="map-toolbar">
+                        <div class="tool-btn active" data-tool="select" onclick="setTool('select', event)" title="Выделить область">
+                            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><path d="M4 4l7 16 2.5-6.5L20 11 4 4z"></path></svg>
+                            <span class="tool-tip">Выделить область на карте</span>
+                        </div>
+                        <div class="tool-btn" data-tool="ruler" onclick="setTool('ruler', event)" title="Линейка">
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M15.5563 1.41421C16.3374 0.633165 17.6037 0.633165 18.3848 1.41421L22.6274 5.65685C23.4085 6.4379 23.4085 7.70423 22.6274 8.48528L8.48527 22.6274C7.70422 23.4085 6.43789 23.4085 5.65684 22.6274L1.4142 18.3848C0.633153 17.6037 0.633154 16.3374 1.4142 15.5563L15.5563 1.41421ZM16.2634 3.53553C16.654 3.14501 17.2871 3.14501 17.6777 3.53553L20.5061 6.36396C20.8966 6.75449 20.8966 7.38765 20.5061 7.77817L19.799 7.07107C19.4085 6.68054 18.7753 6.68054 18.3848 7.07107C17.9942 7.46159 17.9942 8.09476 18.3848 8.48528L19.0919 9.19239L17.6777 10.6066L15.5563 8.48528C15.1658 8.09476 14.5326 8.09476 14.1421 8.48528C13.7516 8.87581 13.7516 9.50897 14.1421 9.89949L16.2634 12.0208L14.8492 13.435L14.1421 12.7279C13.7516 12.3374 13.1184 12.3374 12.7279 12.7279C12.3374 13.1184 12.3374 13.7516 12.7279 14.1421L13.435 14.8492L12.0208 16.2635L9.89948 14.1421C9.50896 13.7516 8.87579 13.7516 8.48527 14.1421C8.09475 14.5327 8.09475 15.1658 8.48527 15.5563L10.6066 17.6777L9.19238 19.0919L8.48527 18.3848C8.09475 17.9943 7.46158 17.9943 7.07106 18.3848C6.68053 18.7753 6.68053 19.4085 7.07106 19.799L7.77816 20.5061C7.38764 20.8966 6.75447 20.8966 6.36395 20.5061L3.53552 17.6777C3.145 17.2871 3.145 16.654 3.53552 16.2635L16.2634 3.53553Z" fill="currentColor"></path></svg>
+                            <span class="tool-tip">Линейка — расстояние между двумя точками</span>
+                        </div>
+                        <div class="tool-btn" data-tool="compass" onclick="setTool('compass', event)" title="Циркуль">
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M21 21L13.3186 8.62439M21 12.9375C18.8012 15.4287 15.5841 17 12 17C8.41592 17 5.19883 15.4287 3 12.9375M3 21L10.6814 8.62439M12 4C10.6193 4 9.5 5.11929 9.5 6.5C9.5 7.39675 9.97215 8.18322 10.6814 8.62439M12 4C13.3807 4 14.5 5.11929 14.5 6.5C14.5 7.39675 14.0279 8.18322 13.3186 8.62439M12 4V3M13.3186 8.62439C12.9358 8.86248 12.484 9 12 9C11.516 9 11.0642 8.86248 10.6814 8.62439" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                            <span class="tool-tip">Циркуль — отложить радиус (центр и край окружности)</span>
+                        </div>
+                        <div class="tool-btn" data-tool="text" onclick="setTool('text', event)" title="Текст">
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M9 9H15" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"></path><path d="M12 15L12 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"></path><path d="M6 4C6 5.10457 5.10457 6 4 6C2.89543 6 2 5.10457 2 4C2 2.89543 2.89543 2 4 2C5.10457 2 6 2.89543 6 4Z" stroke="currentColor" stroke-width="1.5"></path><path d="M6 20C6 21.1046 5.10457 22 4 22C2.89543 22 2 21.1046 2 20C2 18.8954 2.89543 18 4 18C5.10457 18 6 18.8954 6 20Z" stroke="currentColor" stroke-width="1.5"></path><path d="M22 4C22 5.10457 21.1046 6 20 6C18.8954 6 18 5.10457 18 4C18 2.89543 18.8954 2 20 2C21.1046 2 22 2.89543 22 4Z" stroke="currentColor" stroke-width="1.5"></path><path d="M22 20C22 21.1046 21.1046 22 20 22C18.8954 22 18 21.1046 18 20C18 18.8954 18.8954 18 20 18C21.1046 18 22 18.8954 22 20Z" stroke="currentColor" stroke-width="1.5"></path><path d="M18 4H6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"></path><path d="M20 18L20 12M20 6V8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"></path><path d="M18 20L12 20M6 20L8 20" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"></path><path d="M4 6L4 18" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"></path></svg>
+                            <span class="tool-tip">Текст — пометка на карте для команды</span>
+                        </div>
+
+                        <div class="tool-btn tool-more" id="tool-more-btn" onclick="toggleMoreMenu(event)" title="Ещё">
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><circle cx="5" cy="12" r="2"></circle><circle cx="12" cy="12" r="2"></circle><circle cx="19" cy="12" r="2"></circle></svg>
+                            <span class="tool-tip">Дополнительные действия с областями</span>
+                        </div>
+                    </div>
+
+                    <div id="more-menu" class="more-menu">
+                <div class="more-menu-item" onclick="startCreateArea()">
+                    <svg class="menu-icon-svg" viewBox="0 0 100 100" width="18" height="18" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="currentColor" d="M32.5 10.95c-6.89 0-12.55 5.66-12.55 12.55c0 4.02 1.935 7.613 4.91 9.916L14.815 54.172a12.354 12.354 0 0 0-2.316-.223C5.61 53.95-.05 59.61-.05 66.5c0 6.89 5.66 12.55 12.55 12.55c5.13 0 9.54-3.151 11.463-7.603l51.277 7.71c1.232 5.629 6.281 9.894 12.26 9.894c6.656 0 12.114-5.297 12.48-11.867a3.5 3.5 0 0 0 .07-.684a3.5 3.5 0 0 0-.071-.7c-.375-6.562-5.829-11.85-12.479-11.85c-.134 0-.264.015-.396.019L80.242 43.05c3.275-2.127 5.509-5.746 5.738-9.867a3.5 3.5 0 0 0 .07-.684a3.5 3.5 0 0 0-.071-.7c-.375-6.562-5.829-11.85-12.479-11.85c-5.062 0-9.452 3.06-11.43 7.415l-17.082-4.517a3.5 3.5 0 0 0-.01-.047c-.374-6.563-5.828-11.852-12.478-11.852zm0 7c3.107 0 5.55 2.443 5.55 5.55c0 3.107-2.443 5.55-5.55 5.55c-3.107 0-5.55-2.443-5.55-5.55c0-3.107 2.443-5.55 5.55-5.55zm41 9c3.107 0 5.55 2.443 5.55 5.55c0 3.107-2.443 5.55-5.55 5.55c-3.107 0-5.55-2.443-5.55-5.55c0-3.107 2.443-5.55 5.55-5.55zm-30.137 2.708l17.739 4.69C62.007 40.37 67.239 45.05 73.5 45.05l.033-.002l6.92 21.092a12.688 12.688 0 0 0-4.705 6.015l-50.916-7.654a12.611 12.611 0 0 0-3.787-7.13l10.342-21.378c.368.033.737.057 1.113.057c4.652 0 8.71-2.592 10.863-6.393zM12.5 60.95c3.107 0 5.55 2.444 5.55 5.551s-2.443 5.55-5.55 5.55c-3.107 0-5.55-2.443-5.55-5.55c0-3.107 2.443-5.55 5.55-5.55zm75 10c3.107 0 5.55 2.444 5.55 5.551s-2.443 5.55-5.55 5.55c-3.107 0-5.55-2.443-5.55-5.55c0-3.107 2.443-5.55 5.55-5.55z"/></svg>
+                    Создать область
+                    <small>Обрисовать полигон от руки (как freehand в QGIS)</small>
+                </div>
+                <div class="more-menu-item" onclick="openEditAreaMode()">
+                    <svg class="menu-icon-svg" fill="currentColor" viewBox="0 0 24 24" width="18" height="18" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M20,3a3,3,0,0,0-2.816,2H15V4a1,1,0,0,0-1-1H10A1,1,0,0,0,9,4V5H6.816A3.012,3.012,0,1,0,5.308,8.687,14.764,14.764,0,0,0,4.017,15H3a1,1,0,0,0-1,1v4a1,1,0,0,0,1,1H7a1,1,0,0,0,1-1V16a1,1,0,0,0-1-1H6.02C6.176,10.058,7.5,8.393,9,7.706V8a1,1,0,0,0,1,1h4a1,1,0,0,0,1-1V7.706c1.5.687,2.824,2.352,2.98,7.294H17a1,1,0,0,0-1,1v4a1,1,0,0,0,1,1h4a1,1,0,0,0,1-1V16a1,1,0,0,0-1-1H19.983a14.764,14.764,0,0,0-1.291-6.313A2.966,2.966,0,0,0,20,9a3,3,0,0,0,0-6ZM6,19H4V17H6Zm14,0H18V17h2ZM4,7A1,1,0,1,1,5,6,1,1,0,0,1,4,7Zm9,0H11V5h2Zm7,0a1,1,0,1,1,1-1A1,1,0,0,1,20,7Z"></path></svg>
+                    Редактирование области
+                    <small>Кисть и ластик (reshape / freehand cut)</small>
+                </div>
+                <div class="more-menu-item" onclick="mergeLayerPolygons()">
+                    <svg class="menu-icon-svg" fill="currentColor" viewBox="0 0 512 512" width="18" height="18" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M395.636,232.727c12.87,0,23.273-10.426,23.273-23.273c0-12.846-10.403-23.273-23.273-23.273h-23.273 c-12.87,0-23.273,10.426-23.273,23.273c0,12.847,10.403,23.273,23.273,23.273H395.636z"/><path d="M232.727,465.455h-23.273c-12.87,0-23.273,10.426-23.273,23.273S196.585,512,209.455,512h23.273 c12.87,0,23.273-10.426,23.273-23.273S245.597,465.455,232.727,465.455z"/><path d="M209.455,372.364c-12.87,0-23.273,10.426-23.273,23.273v23.273c0,12.847,10.403,23.273,23.273,23.273 c12.87,0,23.273-10.426,23.273-23.273v-23.273C232.727,382.79,222.324,372.364,209.455,372.364z"/><path d="M209.455,349.091c12.87,0,23.273-10.426,23.273-23.273h46.545h23.273c12.87,0,23.273-10.426,23.273-23.273v-69.818 v-23.273V23.273C325.818,10.426,315.415,0,302.545,0H23.273C10.403,0,0,10.426,0,23.273v279.273 c0,12.847,10.403,23.273,23.273,23.273h162.909C186.182,338.665,196.585,349.091,209.455,349.091z"/><path d="M325.818,465.455h-23.273c-12.87,0-23.273,10.426-23.273,23.273S289.676,512,302.545,512h23.273 c12.87,0,23.273-10.426,23.273-23.273S338.688,465.455,325.818,465.455z"/><path d="M488.727,256c-12.87,0-23.273,10.426-23.273,23.273v23.273c0,12.847,10.403,23.273,23.273,23.273 S512,315.392,512,302.545v-23.273C512,266.426,501.597,256,488.727,256z"/><path d="M488.727,349.091c-12.87,0-23.273,10.426-23.273,23.273v23.273c0,12.847,10.403,23.273,23.273,23.273 S512,408.483,512,395.636v-23.273C512,359.517,501.597,349.091,488.727,349.091z"/><path d="M488.727,442.182c-12.87,0-23.273,10.426-23.273,23.273v23.273c0,12.847,10.403,23.273,23.273,23.273 S512,501.574,512,488.727v-23.273C512,452.608,501.597,442.182,488.727,442.182z"/><path d="M418.909,465.455h-23.273c-12.87,0-23.273,10.426-23.273,23.273S382.767,512,395.636,512h23.273 c12.87,0,23.273-10.426,23.273-23.273S431.779,465.455,418.909,465.455z"/><path d="M488.727,232.727c12.87,0,23.273-10.426,23.273-23.273c0-12.846-10.403-23.273-23.273-23.273h-23.273 c-12.87,0-23.273,10.426-23.273,23.273c0,12.847,10.403,23.273,23.273,23.273H488.727z"/></svg>
+                    Объединить полигоны
+                    <small>Выделите 2+ полигона (Ctrl) и объедините</small>
+                </div>
+                <!-- Панель кисти/ластика — внутри меню «Ещё», не пересекается с основной панелью -->
+                <div id="edit-area-controls" class="edit-area-controls" style="display:none;">
+                    <div class="edit-area-title" id="paint-hud-title">Рисование</div>
+                    <div class="settings-block-title">Слой</div>
+                    <select id="draw-layer-select" class="search-input" onchange="onDrawLayerSelect(this.value)"></select>
+                    <div id="create-crop-block" class="create-crop-block">
+                        <div class="settings-block-title">Культура</div>
+                        <select id="create-crop-select" class="search-input"></select>
+                    </div>
+                    <div class="edit-mode-btns">
+                        <button type="button" class="mini-btn" id="edit-brush-btn" onclick="setEditDrawMode('brush')">Кисть</button>
+                        <button type="button" class="mini-btn" id="edit-eraser-btn" onclick="setEditDrawMode('eraser')">Ластик</button>
+                    </div>
+                    <div class="settings-block-title">Толщина: <span id="brush-size-value">20</span> м</div>
+                    <input type="range" id="brush-size" min="5" max="80" value="20" class="range-input settings-range" oninput="document.getElementById('brush-size-value').innerText=this.value">
+                    <button type="button" class="mini-btn mini-btn-red" onclick="finishEditAreaMode()">Готово</button>
+                </div>
+                    </div>
+                </div>
+            </div>
+
+            <input type="color" id="paint-color-input" class="hidden-color-input" style="display:none">
+
+            <div id="map"></div>
+
+            <div class="bottom-bar">
+                <span id="coords-display">—</span>
+                <span class="bottom-bar-sep" id="scale-display">1:25 000</span>
+                <span id="toast" class="toast"></span>
+                <div class="legend" id="legend"></div>
+            </div>
+        </div>
+    </main>
+
+    <!-- ---------------- ВКЛАДКА: АККАУНТ ---------------- -->
+    <main id="view-account" class="view-container" style="display:none;">
+        <div class="account-wrapper">
+            <button type="button" class="account-back-btn" onclick="switchMainTab('map')" title="Вернуться к карте">
+                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>
+                <span>К карте</span>
+            </button>
+
+            <div class="account-topbar">
+                <div class="account-header">
+                    <h2>Аккаунт</h2>
+                    <p>Профиль пользователя и история активности</p>
+                </div>
+                <div class="account-stats-row">
+                    <div class="stat-card">
+                        <div class="stat-num" id="stat-exports">0</div>
+                        <div class="stat-label">Экспортов</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-num" id="stat-processed">0</div>
+                        <div class="stat-label">Обработано</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="account-grid account-grid-revised">
+                <div class="account-history">
+                    <div class="card">
+                        <div class="history-header">
+                            <div class="card-title">ИСТОРИЯ АКТИВНОСТИ</div>
+                            <div class="history-controls">
+                                <select id="history-filter" class="history-filter" onchange="renderHistoryFeed()">
+                                    <option value="all">Все</option>
+                                    <option value="account">Аккаунт</option>
+                                    <option value="tool">Инструменты и карта</option>
+                                    <option value="export">Экспорт</option>
+                                    <option value="process">Загрузка и обработка</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="history-toolbar">
+                            <input type="search" id="history-search" class="search-input history-search" placeholder="Поиск по истории…" oninput="renderHistoryFeed()">
+                            <select id="history-sort" class="history-filter" onchange="renderHistoryFeed()" title="Сортировка">
+                                <option value="newest">Сначала новые</option>
+                                <option value="oldest">Сначала старые</option>
+                            </select>
+                        </div>
+                        <div class="table-container">
+                            <div id="history-feed" class="history-feed"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="account-main">
+                    <div class="card account-profile-card">
+                        <div class="profile-header">
+                            <div class="user-avatar large" id="card-avatar">ГС</div>
+                            <div>
+                                <h3 id="user-display-name">—</h3>
+                                <p id="user-display-role-org">—</p>
+                            </div>
+                        </div>
+
+                        <div class="input-row">
+                            <div class="input-group">
+                                <label>ИМЯ</label>
+                                <input type="text" id="prof-name">
+                            </div>
+                            <div class="input-group">
+                                <label>ФАМИЛИЯ</label>
+                                <input type="text" id="prof-lastname">
+                            </div>
+                        </div>
+                        <div class="input-group">
+                            <label>EMAIL</label>
+                            <input type="email" id="prof-email" disabled>
+                        </div>
+                        <div class="input-row">
+                            <div class="input-group">
+                                <label>ОРГАНИЗАЦИЯ</label>
+                                <input type="text" id="prof-org">
+                            </div>
+                            <div class="input-group">
+                                <label>РОЛЬ</label>
+                                <input type="text" id="prof-role">
+                            </div>
+                        </div>
+                        <div class="input-row">
+                            <div class="input-group">
+                                <label>НОВЫЙ ПАРОЛЬ</label>
+                                <div class="password-field">
+                                    <input type="password" id="prof-new-password" placeholder="8+ симв., Aa и спецсимвол" autocomplete="new-password">
+                                    <button type="button" class="password-toggle" aria-label="Показать пароль" title="Показать пароль"></button>
+                                </div>
+                            </div>
+                            <div class="input-group">
+                                <label>ПОВТОРИТЕ</label>
+                                <div class="password-field">
+                                    <input type="password" id="prof-new-password2" placeholder="••••••••" autocomplete="new-password">
+                                    <button type="button" class="password-toggle" aria-label="Показать пароль" title="Показать пароль"></button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="account-profile-actions">
+                            <button class="btn btn-dark" onclick="saveProfile()">Сохранить изменения</button>
+                            <button type="button" class="btn btn-red btn-account-danger" onclick="deleteAccount()">Удалить аккаунт</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+</div>
+
+<div id="folder-picker" class="folder-picker app-modal" style="display:none;" role="dialog" aria-labelledby="folder-picker-title">
+    <div class="folder-picker-backdrop" onclick="closeFolderPicker()"></div>
+    <div class="folder-picker-panel">
+        <div class="folder-picker-title" id="folder-picker-title">Выберите папку</div>
+        <div id="folder-picker-list" class="folder-picker-list"></div>
+        <div class="app-modal-actions">
+            <button type="button" class="mini-btn" onclick="closeFolderPicker()">Отмена</button>
+        </div>
+    </div>
+</div>
+
+<div id="app-modal" class="folder-picker app-modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="app-modal-title">
+    <div class="folder-picker-backdrop" onclick="closeAppModal()"></div>
+    <div class="folder-picker-panel">
+        <div class="folder-picker-title" id="app-modal-title"></div>
+        <div id="app-modal-body" class="app-modal-body"></div>
+        <div id="app-modal-actions" class="app-modal-actions"></div>
+    </div>
+</div>
+
+<!-- Загрузка аватарки (для аккаунта) -->
+<input type="file" id="avatar-file-input" accept="image/*" style="display:none" onchange="handleAvatarFile(this.files[0])">
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+<script src="https://unpkg.com/shpjs@latest/dist/shp.js"></script>
+<script src="https://unpkg.com/shp-write@latest/shpwrite.js"></script>
+<script src="app.js?v=20260816-ml-backend"></script>
+</body>
+</html>
