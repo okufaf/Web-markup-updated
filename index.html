@@ -13,7 +13,7 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
 
-<link rel="stylesheet" href="style.css?v=20260816-right-seg">
+<link rel="stylesheet" href="style.css?v=20260904-dock">
 </head>
 <body>
 
@@ -189,7 +189,10 @@
         </div>
         <div class="topbar-right">
             <span class="company-name">ООО «ТЕХНОЛОГИИ ЗЕМЛЕДЕЛИЯ» · TTZ</span>
-            <span class="status-online" id="status-online">• Онлайн</span>
+            <span class="status-pills">
+                <span class="status-online" id="status-dzz" title="Проверка dzz.by">dzz.by · Онлайн</span>
+                <span class="status-ml" id="status-ml">ML</span>
+            </span>
             <button class="topbar-logout" type="button" onclick="handleLogout()" title="Выйти из аккаунта">
                 <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
                 Выйти
@@ -397,32 +400,86 @@
 
                 <div id="basemap-dzz-block" class="basemap-extra-block">
                     <div class="settings-section-title">Доступ к dzz.by</div>
-                    <p class="panel-hint">Закрытый ресурс с тайлами максимального разрешения. Укажите логин и пароль для загрузки подложки.</p>
+                    <p class="panel-hint">Закрытый ресурс. Укажите логин, пароль и адрес подключения. Учётные данные не сохраняются в браузере: сервер проверяет соединение и сам подставляет их при запросах к dzz.by.</p>
                     <div class="settings-block-title">Логин dzz.by</div>
-                    <input type="text" id="opt-dzz-login" class="search-input" autocomplete="username" placeholder="логин">
+                    <input type="text" id="opt-dzz-login" class="search-input" autocomplete="off" placeholder="логин">
                     <div class="settings-block-title">Пароль dzz.by</div>
                     <div class="password-field settings-password-field">
-                        <input type="password" id="opt-dzz-password" class="search-input" autocomplete="current-password" placeholder="пароль">
+                        <input type="password" id="opt-dzz-password" class="search-input" autocomplete="off" placeholder="пароль">
                         <button type="button" class="password-toggle" aria-label="Показать пароль" title="Показать пароль"></button>
                     </div>
-                    <div class="settings-block-title">URL шаблон тайлов</div>
-                    <input type="text" id="opt-dzz-url" class="search-input" placeholder="https://www.dzz.by/.../{z}/{x}/{y}.jpg">
-                    <p class="panel-hint">Используйте {z}/{x}/{y}. Для Basic Auth достаточно логина и пароля выше; при необходимости подставьте {user} и {pass} в URL.</p>
+                    <div class="settings-block-title">Адрес подключения</div>
+                    <input type="text" id="opt-dzz-url" class="search-input" placeholder="https://www.dzz.by/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer" value="https://www.dzz.by/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer/tile/{z}/{y}/{x}">
+                    <p class="panel-hint">Шаблон тайлов: ArcGIS {z}/{y}/{x} (не OSM {z}/{x}/{y}). Рабочий зум 8–22; на 10–14 готовые тайлы, ближе — живой снимок. Соседи и следующий зум подгружаются заранее; при приближении сначала увеличенный тайл с предыдущего уровня, затем полный снимок. Если тайла нет, остаётся спутник. Можно перейти к z/x/y или включить сетку.</p>
+                    <button type="button" class="mini-btn" id="dzz-test-btn" onclick="testDzzAccess()">Проверить подключение</button>
+                    <p id="dzz-conn-status" class="panel-hint" style="margin-top:0;"></p>
+                    <button type="button" class="mini-btn" id="dzz-logout-btn" onclick="disconnectDzz()">Выйти из dzz.by</button>
+                    <div class="settings-block-title">WMTS</div>
+                    <p class="panel-hint">Разбор WMTSCapabilities.xml: слой, стиль и матрица тайлов. Клиент собирает REST {z}/{y}/{x}. У dzz.by матрицы GoogleMapsCompatible нет (ответ 520) — выберите default028mm.</p>
+                    <button type="button" class="mini-btn" onclick="loadWmtsCatalog('dzz')">Загрузить WMTSCapabilities</button>
+                    <p id="dzz-wmts-status" class="panel-hint" style="margin-top:0;"></p>
+                    <div id="dzz-wmts-panel" hidden>
+                        <div class="settings-block-title">Слой</div>
+                        <select id="opt-dzz-wmts-layer" class="search-input" onchange="onWmtsLayerChange('dzz')"></select>
+                        <div class="settings-block-title">Матрица тайлов</div>
+                        <select id="opt-dzz-wmts-matrix" class="search-input" onchange="onWmtsMatrixChange('dzz')"></select>
+                        <div class="settings-block-title">Стиль</div>
+                        <select id="opt-dzz-wmts-style" class="search-input"></select>
+                        <p id="opt-dzz-wmts-hint" class="panel-hint"></p>
+                        <button type="button" class="mini-btn" onclick="applyWmtsSelection('dzz')">Применить слой WMTS</button>
+                    </div>
+                    <div class="settings-block-title">Тайл z / x / y</div>
+                    <p class="panel-hint">Переход к клетке Web Mercator. Стрелки сдвигают на соседний тайл, Ctrl+клик по карте — к тайлу под курсором.</p>
+                    <div class="dzz-tile-jump-row">
+                        <label>z <input id="opt-dzz-tile-z" class="dzz-tile-input" type="number" min="0" max="22" inputmode="numeric"></label>
+                        <label>x <input id="opt-dzz-tile-x" class="dzz-tile-input dzz-tile-input-wide" type="number" min="0" inputmode="numeric"></label>
+                        <label>y <input id="opt-dzz-tile-y" class="dzz-tile-input dzz-tile-input-wide" type="number" min="0" inputmode="numeric"></label>
+                        <button type="button" class="mini-btn dzz-tile-go" onclick="goToDzzTileFromForm()">Перейти</button>
+                    </div>
+                    <div class="dzz-tile-nav dzz-tile-nav-settings">
+                        <button type="button" onclick="shiftDzzTile(0,-1)" title="Север">↑</button>
+                        <button type="button" onclick="shiftDzzTile(-1,0)" title="Запад">←</button>
+                        <button type="button" onclick="shiftDzzTile(1,0)" title="Восток">→</button>
+                        <button type="button" onclick="shiftDzzTile(0,1)" title="Юг">↓</button>
+                    </div>
+                    <label class="settings-toggle">
+                        <input type="checkbox" id="opt-dzz-tile-grid" onchange="setDzzTileGrid(this.checked)">
+                        <span class="checkmark"></span>
+                        <span>Показать сетку тайлов</span>
+                    </label>
+                    <p id="dzz-tile-current" class="panel-hint">Текущий тайл: —</p>
+                    <div id="dzz-sites-settings" class="dzz-sites-settings" hidden>
+                        <div class="settings-block-title">Участки ортофото</div>
+                        <p class="panel-hint">Нажмите участок, чтобы перейти к его центру на карте.</p>
+                        <div id="dzz-sites-settings-list" class="dzz-sites-settings-list"></div>
+                    </div>
                 </div>
 
                 <div id="basemap-custom-block" class="basemap-extra-block" style="display:none;">
                     <div class="settings-section-title">Дополнительная подложка</div>
-                    <p class="panel-hint">Подключите свой XYZ/WMTS-шаблон тайлов для работы системы поверх сторонней подложки.</p>
+                    <p class="panel-hint">XYZ: OSM — {z}/{x}/{y}, ArcGIS — {z}/{y}/{x}. Можно вставить WMTSCapabilities.xml — клиент разберёт слои. Матрица EPSG:4326 / GoogleCRS84Quad переключает карту в градусы; спутник, схема и dzz.by остаются в Web Mercator.</p>
                     <div class="settings-block-title">Название</div>
                     <input type="text" id="opt-custom-basemap-name" class="search-input" placeholder="Моя подложка">
-                    <div class="settings-block-title">URL шаблон тайлов</div>
-                    <input type="text" id="opt-custom-basemap-url" class="search-input" placeholder="https://example.com/tiles/{z}/{x}/{y}.png">
+                    <div class="settings-block-title">URL шаблон тайлов или WMTSCapabilities.xml</div>
+                    <input type="text" id="opt-custom-basemap-url" class="search-input" placeholder="https://example.com/wmts/1.0.0/WMTSCapabilities.xml">
                     <div class="settings-block-title">Логин (если нужен)</div>
                     <input type="text" id="opt-custom-basemap-login" class="search-input" autocomplete="off" placeholder="необязательно">
                     <div class="settings-block-title">Пароль (если нужен)</div>
                     <div class="password-field settings-password-field">
                         <input type="password" id="opt-custom-basemap-password" class="search-input" autocomplete="new-password" placeholder="необязательно">
                         <button type="button" class="password-toggle" aria-label="Показать пароль" title="Показать пароль"></button>
+                    </div>
+                    <button type="button" class="mini-btn" onclick="loadWmtsCatalog('custom')">Загрузить WMTSCapabilities</button>
+                    <p id="custom-wmts-status" class="panel-hint" style="margin-top:0;"></p>
+                    <div id="custom-wmts-panel" hidden>
+                        <div class="settings-block-title">Слой</div>
+                        <select id="opt-custom-wmts-layer" class="search-input" onchange="onWmtsLayerChange('custom')"></select>
+                        <div class="settings-block-title">Матрица тайлов</div>
+                        <select id="opt-custom-wmts-matrix" class="search-input" onchange="onWmtsMatrixChange('custom')"></select>
+                        <div class="settings-block-title">Стиль</div>
+                        <select id="opt-custom-wmts-style" class="search-input"></select>
+                        <p id="opt-custom-wmts-hint" class="panel-hint"></p>
+                        <button type="button" class="mini-btn" onclick="applyWmtsSelection('custom')">Применить слой WMTS</button>
                     </div>
                 </div>
 
@@ -554,8 +611,46 @@
 
             <div id="map"></div>
 
+            <div id="dzz-sites-bar" class="dzz-sites-bar" hidden>
+                <div class="dzz-dock-chrome">
+                    <div class="dzz-dock-tabs" role="tablist" aria-label="Панель dzz.by">
+                        <button type="button" id="dzz-tab-sites" class="dzz-dock-tab" role="tab" aria-controls="dzz-sites-pane" aria-selected="false" onclick="setDzzDockMode('sites')">Участки</button>
+                        <button type="button" id="dzz-tab-tiles" class="dzz-dock-tab" role="tab" aria-controls="dzz-tiles-pane" aria-selected="false" onclick="setDzzDockMode('tiles')">Тайлы</button>
+                    </div>
+                    <button type="button" id="dzz-dock-summary" class="dzz-dock-summary" onclick="toggleDzzDock()" title="Развернуть панель">—</button>
+                    <button type="button" class="dzz-dock-toggle" id="dzz-dock-toggle" onclick="toggleDzzDock()" aria-expanded="false" title="Развернуть панель">
+                        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg>
+                    </button>
+                    <button type="button" class="dzz-sites-exit" onclick="disconnectDzz()">Обычная карта</button>
+                </div>
+                <div class="dzz-dock-body">
+                    <div class="dzz-dock-body-clip">
+                        <div id="dzz-sites-pane" class="dzz-dock-pane" role="tabpanel" hidden>
+                            <span id="dzz-sites-label" class="dzz-sites-label">Участки dzz.by</span>
+                            <div id="dzz-sites-list" class="dzz-sites-list" role="list"></div>
+                        </div>
+                        <div id="dzz-tiles-pane" class="dzz-dock-pane dzz-tile-bar" role="tabpanel" hidden>
+                            <span class="dzz-sites-label">Тайл z/x/y</span>
+                            <input id="dzz-bar-z" class="dzz-tile-input" type="number" min="0" max="22" inputmode="numeric" aria-label="z">
+                            <input id="dzz-bar-x" class="dzz-tile-input dzz-tile-input-wide" type="number" min="0" inputmode="numeric" aria-label="x">
+                            <input id="dzz-bar-y" class="dzz-tile-input dzz-tile-input-wide" type="number" min="0" inputmode="numeric" aria-label="y">
+                            <button type="button" class="dzz-sites-exit" onclick="goToDzzTileFromForm()">Перейти</button>
+                            <div class="dzz-tile-nav">
+                                <button type="button" onclick="shiftDzzTile(0,-1)" title="Север">↑</button>
+                                <button type="button" onclick="shiftDzzTile(-1,0)" title="Запад">←</button>
+                                <button type="button" onclick="shiftDzzTile(1,0)" title="Восток">→</button>
+                                <button type="button" onclick="shiftDzzTile(0,1)" title="Юг">↓</button>
+                            </div>
+                            <button type="button" class="dzz-sites-exit" id="dzz-grid-toggle" onclick="toggleDzzTileGrid()" aria-pressed="false">Сетка</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div class="bottom-bar">
                 <span id="coords-display">—</span>
+                <span class="bottom-bar-sep" id="tile-display">z/x/y —</span>
+                <span class="bottom-bar-sep" id="crs-display">EPSG:3857</span>
                 <span class="bottom-bar-sep" id="scale-display">1:25 000</span>
                 <span id="toast" class="toast"></span>
                 <div class="legend" id="legend"></div>
@@ -705,6 +800,6 @@
 <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
 <script src="https://unpkg.com/shpjs@latest/dist/shp.js"></script>
 <script src="https://unpkg.com/shp-write@latest/shpwrite.js"></script>
-<script src="app.js?v=20260816-ml-backend"></script>
+<script src="app.js?v=20260904-dock"></script>
 </body>
 </html>

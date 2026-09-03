@@ -217,7 +217,7 @@ async function apiFetch(url, options = {}) {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-        const err = new Error(data.error || 'REQUEST_FAILED');
+        const err = new Error(data.message || data.error || 'REQUEST_FAILED');
         err.status = res.status;
         err.code = data.error;
         throw err;
@@ -617,27 +617,548 @@ function getTopCrop(meta) {
     return meta.crops[0];
 }
 
-const DZZ_DEFAULT_TILE_URL = 'https://www.dzz.by/tiles/{z}/{x}/{y}.jpg';
+const DZZ_DEFAULT_SERVICE = 'https://www.dzz.by/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer';
+const DZZ_DEFAULT_TILE_URL = `${DZZ_DEFAULT_SERVICE}/tile/{z}/{y}/{x}`;
 
+function isLegacyDzzUrl(url) {
+    const value = String(url || '').trim();
+    if (!value) return true;
+    return /dzz\.by\/tiles\//i.test(value) || value === 'https://www.dzz.by/tiles/{z}/{x}/{y}.jpg';
+}
+
+function resolveDzzTileTemplate(urlTemplate) {
+    let url = String(urlTemplate || '').trim();
+    if (!url || isLegacyDzzUrl(url)) url = DZZ_DEFAULT_TILE_URL;
+
+    const isDzzOrArcGis = /dzz\.by/i.test(url) || /\/arcgis\/rest\/services\//i.test(url) || /WMTS|ImageServer|{TileMatrix}/i.test(url);
+    if (!isDzzOrArcGis) {
+        return { url, zoomOffset: 0, minNativeZoom: 0, maxNativeZoom: 22, maxZoom: 22 };
+    }
+
+    url = url.replace(/^http:\/\//i, 'https://');
+    const isWmtsTile = /\/WMTS\/tile\//i.test(url) || /request=GetTile/i.test(url);
+    if (!isWmtsTile) {
+        url = url.replace(/\/WMTS(?:\/1\.0\.0\/WMTSCapabilities\.xml)?\/?$/i, '');
+        url = url.replace(/\/+$/, '');
+        if (/\/(ImageServer|MapServer)$/i.test(url) && !url.includes('{z}') && !url.includes('{TileMatrix}')) {
+            url = `${url}/tile/{z}/{y}/{x}`;
+        }
+    }
+
+    url = url.replaceAll('{Style}', 'default');
+    url = url.replaceAll('{TileMatrixSet}', /GoogleMapsCompatible/i.test(url) ? 'GoogleMapsCompatible' : 'default028mm');
+    url = url.replaceAll('{TileMatrix}', '{z}');
+    url = url.replaceAll('{TileRow}', '{y}');
+    url = url.replaceAll('{TileCol}', '{x}');
+
+    if (/\/(ImageServer|MapServer)\/tile\//i.test(url) && /\{z\}\/\{x\}\/\{y\}/.test(url)) {
+        url = url.replace('{z}/{x}/{y}', '{z}/{y}/{x}');
+    }
+
+    const isGmc = /GoogleMapsCompatible/i.test(url);
+    const usesServiceLevels = !isGmc && (/Polya_all/i.test(url) || /default028mm/i.test(url) || /\/ImageServer\/tile\//i.test(url));
+    return {
+        url,
+        zoomOffset: usesServiceLevels ? -8 : 0,
+        minNativeZoom: usesServiceLevels ? 8 : 0,
+        maxNativeZoom: isGmc ? 19 : 22,
+        maxZoom: 22,
+    };
+}
+
+/** XYZ/WMTS для пользовательской подложки. EPSG:4326 не получает смещение зума dzz (−8). */
+function resolveXyzTileTemplate(urlTemplate) {
+    let url = String(urlTemplate || '').trim();
+    if (!url) return null;
+    url = url.replace(/^http:\/\//i, 'https://');
+    url = url.replaceAll('{TileMatrix}', '{z}');
+    url = url.replaceAll('{TileRow}', '{y}');
+    url = url.replaceAll('{TileCol}', '{x}');
+    url = url.replaceAll('{Style}', 'default');
+    if (url.includes('{TileMatrixSet}') && /dzz\.by|default028mm|GoogleMapsCompatible|GoogleCRS84Quad/i.test(url)) {
+        url = url.replaceAll('{TileMatrixSet}',
+            /GoogleMapsCompatible/i.test(url) ? 'GoogleMapsCompatible'
+                : /GoogleCRS84Quad/i.test(url) ? 'GoogleCRS84Quad'
+                    : 'default028mm');
+    }
+    if (!url.includes('{z}') && !url.includes('{TileMatrix}')) return null;
+    const isArcGisTile = /\/(ImageServer|MapServer)\/tile\//i.test(url);
+    if (isArcGisTile && /\{z\}\/\{x\}\/\{y\}/.test(url)) {
+        url = url.replace('{z}/{x}/{y}', '{z}/{y}/{x}');
+    }
+    const is4326 = /GoogleCRS84Quad/i.test(url) || basemapExtra.customCrs === 'EPSG:4326';
+    const isGmc = /GoogleMapsCompatible/i.test(url);
+    const isDzzPolya = /dzz\.by/i.test(url) && /Polya_all/i.test(url) && !isGmc && !is4326;
+    const uses028 = /default028mm/i.test(url) && !is4326;
+    const storedOffset = Number.isFinite(basemapExtra.customZoomOffset) ? basemapExtra.customZoomOffset : 0;
+    return {
+        url,
+        zoomOffset: is4326 ? storedOffset : (isDzzPolya || uses028 ? -8 : 0),
+        minNativeZoom: is4326
+            ? (Number.isFinite(basemapExtra.customMinNativeZoom) ? basemapExtra.customMinNativeZoom : 0)
+            : (isDzzPolya || uses028 ? 8 : 0),
+        maxNativeZoom: is4326
+            ? (Number.isFinite(basemapExtra.customMaxNativeZoom) ? basemapExtra.customMaxNativeZoom : 21)
+            : (isGmc ? 19 : (isDzzPolya ? 22 : 19)),
+        maxZoom: 22,
+    };
+}
+
+function dzzBasicHeader(login, password) {
+    return 'Basic ' + btoa(unescape(encodeURIComponent(`${login}:${password || ''}`)));
+}
+
+function toSameOriginDzzUrl(url) {
+    try {
+        const parsed = new URL(url, window.location.href);
+        if (!/^(www\.)?dzz\.by$/i.test(parsed.hostname)) return url;
+        return `${window.location.origin}/api/dzz${parsed.pathname}${parsed.search}`;
+    } catch {
+        return url;
+    }
+}
+
+const DZZ_MERCATOR_MAX = 20037508.342789244;
+const DZZ_CACHE_MIN_Z = 10;
+const DZZ_CACHE_MAX_Z = 14;
+const DZZ_VIEW_ZOOM = 16;
+const DZZ_EMPTY_TILE_BYTES = 2048;
+const DZZ_TILE_TIMEOUT_MS = 12000;
+const DZZ_CAPTURE_TIMEOUT_MS = 20000;
+const DZZ_MAX_INFLIGHT = 6;
+const DZZ_PREFETCH_SLOTS = 2;
+const DZZ_TILE_CACHE_MAX = 480;
+const DZZ_PREFETCH_MAX = 16;
+const DZZ_PREFETCH_MAX_Z = 20;
+const DZZ_TRANSPARENT_PIXEL = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
+const DZZ_SITE_LABELS = {
+    berestovica_polya: 'Берестовица',
+    Berezovski_rn_polya: 'Берёзовский р-н',
+    myadel_polya: 'Мядель',
+    Smolevichy_polya: 'Смолевичи',
+};
+
+let dzzSites = [];
+let dzzActiveSiteId = '';
+let dzzSitesRequestId = 0;
+let dzzTileGridOn = false;
+let dzzTileGridLayer = null;
+let dzzDockMode = 'sites';
+let dzzDockOpen = false;
+let dzzHealthAvailable = true;
+let dzzHealthTimer = 0;
+let dzzStatusInflight = false;
+
+function dzzImageServerRoot(url) {
+    const match = String(url || '').match(/^(https:\/\/[^/]+\/arcgis\/rest\/services\/[^/]+\/[^/]+\/ImageServer)/i);
+    return match ? match[1] : DZZ_DEFAULT_SERVICE;
+}
+
+function dzzFetch(url, signal) {
+    return fetch(toSameOriginDzzUrl(url), { credentials: 'same-origin', signal });
+}
+
+function dzzFetchWithTimeout(url, ms = DZZ_TILE_TIMEOUT_MS, externalSignal) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), ms);
+    const onAbort = () => ctrl.abort();
+    if (externalSignal) {
+        if (externalSignal.aborted) ctrl.abort();
+        else externalSignal.addEventListener('abort', onAbort, { once: true });
+    }
+    return dzzFetch(url, ctrl.signal).finally(() => {
+        clearTimeout(timer);
+        if (externalSignal) externalSignal.removeEventListener('abort', onAbort);
+    });
+}
+
+function dzzWait(ms, signal) {
+    return new Promise((resolve, reject) => {
+        if (signal?.aborted) {
+            reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+            return;
+        }
+        const timer = setTimeout(resolve, ms);
+        const onAbort = () => {
+            clearTimeout(timer);
+            reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+        };
+        if (signal) signal.addEventListener('abort', onAbort, { once: true });
+    });
+}
+
+async function dzzFetchResilient(url, ms = DZZ_TILE_TIMEOUT_MS, signal, attempts = 3) {
+    let lastErr;
+    for (let i = 0; i < attempts; i++) {
+        if (signal?.aborted) {
+            throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+        }
+        try {
+            const res = await dzzFetchWithTimeout(url, ms, signal);
+            if (res.status === 401) {
+                const body = await res.clone().json().catch(() => ({}));
+                if (body.error === 'DZZ_NOT_CONNECTED' && i < attempts - 1) {
+                    await restoreDzzSession({ skipHealth: true });
+                    if (dzzSession.connected) continue;
+                }
+                return res;
+            }
+            if (res.ok || (res.status < 500 && res.status !== 429)) return res;
+            lastErr = new Error('TILE_HTTP_' + res.status);
+        } catch (err) {
+            if (err?.name === 'AbortError') throw err;
+            lastErr = err;
+        }
+        if (i < attempts - 1) await dzzWait(400 * (i + 1), signal);
+    }
+    if (lastErr) throw lastErr;
+    throw new Error('DZZ_FETCH');
+}
+
+const dzzTileCache = new Map();
+const dzzInflightByKey = new Map();
+const dzzHighQueue = [];
+const dzzLowQueue = [];
+let dzzInflight = 0;
+let dzzPrefetchInflight = 0;
+let dzzPrefetchTimer = 0;
+
+function dzzCachePeek(key) {
+    return dzzTileCache.get(key) || null;
+}
+
+function dzzCacheGet(key) {
+    const hit = dzzTileCache.get(key);
+    if (!hit) return null;
+    dzzTileCache.delete(key);
+    dzzTileCache.set(key, hit);
+    return hit;
+}
+
+function dzzCacheSet(key, blob) {
+    if (!blob || blob.size < 80) return;
+    if (dzzTileCache.has(key)) dzzTileCache.delete(key);
+    dzzTileCache.set(key, blob);
+    while (dzzTileCache.size > DZZ_TILE_CACHE_MAX) {
+        dzzTileCache.delete(dzzTileCache.keys().next().value);
+    }
+}
+
+function dzzPumpQueue() {
+    while (dzzInflight < DZZ_MAX_INFLIGHT) {
+        const high = dzzHighQueue.shift();
+        if (high) {
+            high();
+            continue;
+        }
+        if (dzzPrefetchInflight >= DZZ_PREFETCH_SLOTS) break;
+        const low = dzzLowQueue.shift();
+        if (!low) break;
+        low();
+    }
+}
+
+function dzzLimit(task, priority = 0) {
+    const isLow = priority > 0;
+    return new Promise((resolve, reject) => {
+        const run = () => {
+            dzzInflight += 1;
+            if (isLow) dzzPrefetchInflight += 1;
+            Promise.resolve()
+                .then(task)
+                .then(resolve, reject)
+                .finally(() => {
+                    dzzInflight -= 1;
+                    if (isLow) dzzPrefetchInflight -= 1;
+                    dzzPumpQueue();
+                });
+        };
+        if (isLow) {
+            if (dzzLowQueue.length >= 28) dzzLowQueue.shift();
+            dzzLowQueue.push(run);
+        } else {
+            dzzHighQueue.push(run);
+        }
+        dzzPumpQueue();
+    });
+}
+
+function dzzEnsureTileBlob(key, loader, priority = 0) {
+    const hit = dzzCachePeek(key);
+    if (hit) return Promise.resolve(hit);
+    const existing = dzzInflightByKey.get(key);
+    if (existing) return existing.promise;
+    const rec = { promise: null };
+    rec.promise = dzzLimit(async () => {
+        const again = dzzCachePeek(key);
+        if (again) return again;
+        const blob = await loader();
+        dzzCacheSet(key, blob);
+        return blob;
+    }, priority).finally(() => {
+        if (dzzInflightByKey.get(key) === rec) dzzInflightByKey.delete(key);
+    });
+    dzzInflightByKey.set(key, rec);
+    return rec.promise;
+}
+
+function dzzPreviewCacheKey(root, coords) {
+    return `${root}|${coords.z}/${coords.x}/${coords.y}|256-png`;
+}
+
+function dzzHiCacheKey(root, coords, size) {
+    return `${root}|${coords.z}/${coords.x}/${coords.y}|${size}-png`;
+}
+
+function dzzFindCachedAncestor(root, coords) {
+    let z = coords.z;
+    let x = coords.x;
+    let y = coords.y;
+    for (let i = 0; i < 8 && z > 0; i++) {
+        z -= 1;
+        x = Math.floor(x / 2);
+        y = Math.floor(y / 2);
+        const blob = dzzCachePeek(dzzPreviewCacheKey(root, { z, x, y }));
+        if (blob && blob.size >= DZZ_EMPTY_TILE_BYTES) return { coords: { z, x, y }, blob };
+    }
+    return null;
+}
+
+function dzzUpscaleFromAncestor(blob, ancestor, child) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        const url = URL.createObjectURL(blob);
+        img.onload = () => {
+            URL.revokeObjectURL(url);
+            const k = child.z - ancestor.z;
+            const factor = 2 ** k;
+            const srcSize = Math.max(1, img.naturalWidth / factor);
+            const sx = (child.x - ancestor.x * factor) * srcSize;
+            const sy = (child.y - ancestor.y * factor) * srcSize;
+            const canvas = document.createElement('canvas');
+            canvas.width = 256;
+            canvas.height = 256;
+            const ctx = canvas.getContext('2d');
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(img, sx, sy, srcSize, srcSize, 0, 0, 256, 256);
+            canvas.toBlob((out) => (out ? resolve(out) : reject(new Error('upscale'))), 'image/png');
+        };
+        img.onerror = () => {
+            URL.revokeObjectURL(url);
+            reject(new Error('upscale'));
+        };
+        img.src = url;
+    });
+}
+
+function dzzLoadPreviewBlob(layer, coords, priority = 0) {
+    const root = layer._serviceRoot;
+    const key = dzzPreviewCacheKey(root, coords);
+    const z = coords.z;
+    const useExportFirst = z > DZZ_CACHE_MAX_Z || z < DZZ_CACHE_MIN_Z;
+    return dzzEnsureTileBlob(key, async () => {
+        const fetchBlob = (url) => dzzFetchResilient(url, DZZ_TILE_TIMEOUT_MS, null).then((res) => {
+            if (!res.ok) throw new Error('TILE_HTTP_' + res.status);
+            return res.blob();
+        });
+        const exportUrl = dzzExportImageUrl(root, coords, 256, 'png');
+        if (useExportFirst) {
+            try {
+                return await fetchBlob(exportUrl);
+            } catch {
+                return fetchBlob(layer.getTileUrl(coords));
+            }
+        }
+        try {
+            const blob = await fetchBlob(layer.getTileUrl(coords));
+            if (blob.size < DZZ_EMPTY_TILE_BYTES) return fetchBlob(exportUrl);
+            return blob;
+        } catch {
+            return fetchBlob(exportUrl);
+        }
+    }, priority);
+}
+
+function dzzClearPrefetchQueue() {
+    if (dzzPrefetchTimer) {
+        clearTimeout(dzzPrefetchTimer);
+        dzzPrefetchTimer = 0;
+    }
+    dzzLowQueue.length = 0;
+}
+
+function dzzTilesInView(z, pad = 1) {
+    if (!map) return [];
+    const bounds = map.getBounds();
+    const nw = map.project(bounds.getNorthWest(), z);
+    const se = map.project(bounds.getSouthEast(), z);
+    const minX = Math.floor(Math.min(nw.x, se.x) / 256) - pad;
+    const maxX = Math.floor(Math.max(nw.x, se.x) / 256) + pad;
+    const minY = Math.floor(Math.min(nw.y, se.y) / 256) - pad;
+    const maxY = Math.floor(Math.max(nw.y, se.y) / 256) + pad;
+    const { nx, ny } = tileGridSize(z);
+    const out = [];
+    for (let y = minY; y <= maxY; y++) {
+        if (y < 0 || y >= ny) continue;
+        for (let x = minX; x <= maxX; x++) {
+            out.push({ z, x: ((x % nx) + nx) % nx, y });
+        }
+    }
+    const c = getMapTileCoords(map.getCenter(), z);
+    out.sort((a, b) => (Math.abs(a.x - c.x) + Math.abs(a.y - c.y)) - (Math.abs(b.x - c.x) + Math.abs(b.y - c.y)));
+    return out;
+}
+
+function scheduleDzzPrefetch() {
+    if (currentBasemap !== 'dzz' || !map || !tileDzz || !dzzSession.connected) return;
+    clearTimeout(dzzPrefetchTimer);
+    dzzPrefetchTimer = setTimeout(runDzzPrefetch, 320);
+}
+
+function runDzzPrefetch() {
+    dzzPrefetchTimer = 0;
+    if (currentBasemap !== 'dzz' || !map || !tileDzz || !dzzSession.connected) return;
+    if (map._animatingZoom || dzzToolsActive()) return;
+    const z = Math.max(0, Math.round(map.getZoom()));
+    const jobs = dzzTilesInView(z, z >= 15 ? 1 : 0);
+    if (z >= DZZ_CACHE_MAX_Z && z < DZZ_PREFETCH_MAX_Z) {
+        const childZ = z + 1;
+        const parent = getMapTileCoords(map.getCenter(), z);
+        jobs.push(
+            { z: childZ, x: parent.x * 2, y: parent.y * 2 },
+            { z: childZ, x: parent.x * 2 + 1, y: parent.y * 2 },
+            { z: childZ, x: parent.x * 2, y: parent.y * 2 + 1 },
+            { z: childZ, x: parent.x * 2 + 1, y: parent.y * 2 + 1 },
+        );
+    }
+    let scheduled = 0;
+    for (const coords of jobs) {
+        if (scheduled >= DZZ_PREFETCH_MAX) break;
+        if (!isDzzTileInCoverage(coords)) continue;
+        const key = dzzPreviewCacheKey(tileDzz._serviceRoot, coords);
+        if (dzzCachePeek(key) || dzzInflightByKey.has(key)) continue;
+        scheduled += 1;
+        dzzLoadPreviewBlob(tileDzz, coords, 1).catch(() => {});
+    }
+}
+
+function leafletTileTo3857(coords, tileSize = 256) {
+    const n = 2 ** coords.z;
+    const res = (2 * DZZ_MERCATOR_MAX) / (tileSize * n);
+    const xmin = coords.x * tileSize * res - DZZ_MERCATOR_MAX;
+    const ymax = DZZ_MERCATOR_MAX - coords.y * tileSize * res;
+    return { xmin, ymin: ymax - tileSize * res, xmax: xmin + tileSize * res, ymax };
+}
+
+function dzzToolsActive() {
+    return activeTool === 'aoi' || activeTool === 'ruler' || activeTool === 'compass'
+        || activeTool === 'freehand' || !!activeDrawHandler || !!aoiDrawHandler;
+}
+
+function dzzExportPixelSize(zoom, map) {
+    if (zoom >= 18 && map && !map._animatingZoom && !dzzToolsActive()) return 512;
+    return 256;
+}
+
+function dzzExportImageUrl(root, coords, size = 256, format = 'png') {
+    const box = leafletTileTo3857(coords);
+    const bbox = `${box.xmin},${box.ymin},${box.xmax},${box.ymax}`;
+    const fmt = format === 'jpg' ? 'jpg' : 'png';
+    const transparent = fmt === 'png' ? '&transparent=true' : '';
+    const interpolation = size >= 512 ? 'RSP_CubicConvolution' : 'RSP_BilinearInterpolation';
+    return `${root}/exportImage?bbox=${bbox}&bboxSR=3857&imageSR=3857&size=${size},${size}&format=${fmt}${transparent}&interpolation=${interpolation}&adjustAspectRatio=false&f=image`;
+}
+
+function isDzzTileInCoverage(coords) {
+    if (!dzzSites.length) return true;
+    const box = leafletTileTo3857(coords);
+    const sw = L.CRS.EPSG3857.unproject(L.point(box.xmin, box.ymin));
+    const ne = L.CRS.EPSG3857.unproject(L.point(box.xmax, box.ymax));
+    const tileBounds = L.latLngBounds(sw, ne);
+    return dzzSites.some((site) => site.bounds.intersects(tileBounds));
+}
+
+function humanizeDzzSiteName(name) {
+    if (DZZ_SITE_LABELS[name]) return DZZ_SITE_LABELS[name];
+    return String(name || 'Участок')
+        .replace(/_polya$/i, '')
+        .replace(/_rn_/gi, ' р-н ')
+        .replace(/_/g, ' ')
+        .trim();
+}
+
+function formatDzzCoords(lat, lng) {
+    return `${Number(lat).toFixed(5)}°N ${Number(lng).toFixed(5)}°E`;
+}
+
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+function boundsFromRing(ring) {
+    const latlngs = (ring || []).map((pt) => [pt[1], pt[0]]);
+    return latlngs.length ? L.latLngBounds(latlngs) : null;
+}
+
+let dzzSession = { connected: false };
 let displaySettings = { pointSize: 5, lineWidth: 2, fillOpacity: 0.35, coordColor: '#ff3366', basemap: 'satellite' };
 let basemapExtra = {
-    dzzLogin: '',
-    dzzPassword: '',
     dzzUrl: DZZ_DEFAULT_TILE_URL,
     customName: '',
     customUrl: '',
     customLogin: '',
     customPassword: '',
+    customCrs: 'EPSG:3857',
+    customZoomOffset: 0,
+    customMinNativeZoom: 0,
+    customMaxNativeZoom: 19,
 };
 function displaySettingsKey() { return 'ttz_display_' + getCurrentEmail(); }
 function basemapExtraKey() { return 'ttz_basemap_extra_' + getCurrentEmail(); }
 
+function persistBasemapExtra() {
+    localStorage.setItem(basemapExtraKey(), JSON.stringify({
+        dzzUrl: basemapExtra.dzzUrl || DZZ_DEFAULT_TILE_URL,
+        customName: basemapExtra.customName || '',
+        customUrl: basemapExtra.customUrl || '',
+        customLogin: basemapExtra.customLogin || '',
+        customPassword: basemapExtra.customPassword || '',
+        customCrs: basemapExtra.customCrs === 'EPSG:4326' ? 'EPSG:4326' : 'EPSG:3857',
+        customZoomOffset: Number.isFinite(basemapExtra.customZoomOffset) ? basemapExtra.customZoomOffset : 0,
+        customMinNativeZoom: Number.isFinite(basemapExtra.customMinNativeZoom) ? basemapExtra.customMinNativeZoom : 0,
+        customMaxNativeZoom: Number.isFinite(basemapExtra.customMaxNativeZoom) ? basemapExtra.customMaxNativeZoom : 19,
+    }));
+}
+
 function loadBasemapExtraToForm() {
     const saved = JSON.parse(localStorage.getItem(basemapExtraKey()) || 'null');
-    if (saved) basemapExtra = { ...basemapExtra, ...saved };
+    if (saved) {
+        basemapExtra = {
+            dzzUrl: DZZ_DEFAULT_TILE_URL,
+            customName: '',
+            customUrl: '',
+            customLogin: '',
+            customPassword: '',
+            customCrs: 'EPSG:3857',
+            customZoomOffset: 0,
+            customMinNativeZoom: 0,
+            customMaxNativeZoom: 19,
+            ...saved,
+        };
+    }
+    basemapExtra.dzzLogin = '';
+    basemapExtra.dzzPassword = '';
+    if (isLegacyDzzUrl(basemapExtra.dzzUrl)) basemapExtra.dzzUrl = DZZ_DEFAULT_TILE_URL;
+    else basemapExtra.dzzUrl = resolveDzzTileTemplate(basemapExtra.dzzUrl).url;
+    persistBasemapExtra();
     const setVal = (id, val) => { const el = document.getElementById(id); if (el) el.value = val || ''; };
-    setVal('opt-dzz-login', basemapExtra.dzzLogin);
-    setVal('opt-dzz-password', basemapExtra.dzzPassword);
+    setVal('opt-dzz-login', '');
+    setVal('opt-dzz-password', '');
     setVal('opt-dzz-url', basemapExtra.dzzUrl || DZZ_DEFAULT_TILE_URL);
     setVal('opt-custom-basemap-name', basemapExtra.customName);
     setVal('opt-custom-basemap-url', basemapExtra.customUrl);
@@ -648,14 +1169,20 @@ function loadBasemapExtraToForm() {
 }
 
 function readBasemapExtraFromForm() {
+    const rawDzzUrl = document.getElementById('opt-dzz-url')?.value.trim() || DZZ_DEFAULT_TILE_URL;
+    const resolvedDzzUrl = resolveDzzTileTemplate(rawDzzUrl).url;
+    const dzzUrlInput = document.getElementById('opt-dzz-url');
+    if (dzzUrlInput) dzzUrlInput.value = resolvedDzzUrl;
     basemapExtra = {
-        dzzLogin: document.getElementById('opt-dzz-login')?.value.trim() || '',
-        dzzPassword: document.getElementById('opt-dzz-password')?.value || '',
-        dzzUrl: document.getElementById('opt-dzz-url')?.value.trim() || DZZ_DEFAULT_TILE_URL,
+        dzzUrl: resolvedDzzUrl,
         customName: document.getElementById('opt-custom-basemap-name')?.value.trim() || '',
         customUrl: document.getElementById('opt-custom-basemap-url')?.value.trim() || '',
         customLogin: document.getElementById('opt-custom-basemap-login')?.value.trim() || '',
         customPassword: document.getElementById('opt-custom-basemap-password')?.value || '',
+        customCrs: basemapExtra.customCrs === 'EPSG:4326' ? 'EPSG:4326' : 'EPSG:3857',
+        customZoomOffset: Number.isFinite(basemapExtra.customZoomOffset) ? basemapExtra.customZoomOffset : 0,
+        customMinNativeZoom: Number.isFinite(basemapExtra.customMinNativeZoom) ? basemapExtra.customMinNativeZoom : 0,
+        customMaxNativeZoom: Number.isFinite(basemapExtra.customMaxNativeZoom) ? basemapExtra.customMaxNativeZoom : 19,
     };
 }
 
@@ -667,10 +1194,23 @@ function updateBasemapExtraVisibility(value) {
     if (custom) custom.style.display = value === 'custom' ? 'block' : 'none';
 }
 
-function onBasemapSelectChange(value) {
+async function onBasemapSelectChange(value) {
     updateBasemapExtraVisibility(value);
-    if (value === 'dzz' && !(document.getElementById('opt-dzz-login')?.value || '').trim()) {
-        showToast('Укажите логин и пароль dzz.by');
+    if (value === 'dzz') {
+        if (dzzSession.connected) {
+            setBasemap('dzz');
+            return;
+        }
+        const login = (document.getElementById('opt-dzz-login')?.value || '').trim();
+        const password = document.getElementById('opt-dzz-password')?.value || '';
+        if (!login || !password) {
+            showToast('Укажите логин и пароль dzz.by');
+            const select = document.getElementById('opt-basemap');
+            if (select) select.value = currentBasemap || 'satellite';
+            return;
+        }
+        await testDzzAccess();
+        return;
     }
     if (value === 'custom' && !(document.getElementById('opt-custom-basemap-url')?.value || '').trim()) {
         showToast('Укажите URL шаблон дополнительной подложки');
@@ -698,7 +1238,6 @@ function loadDisplaySettings() {
     if (bm) bm.value = displaySettings.basemap || 'satellite';
     loadBasemapExtraToForm();
     applyDisplaySettings();
-    if (mapInitialized && map) setBasemap(displaySettings.basemap || 'satellite', true);
 }
 function getFillOpacity(isPoint = false) {
     const base = typeof displaySettings.fillOpacity === 'number' ? displaySettings.fillOpacity : 0.35;
@@ -1000,9 +1539,13 @@ function enterApp() {
     renderHistoryFeed();
     loadDisplaySettings();
     if (!mapInitialized) { initMap(); loadFoldersState(); mapInitialized = true; }
-    if (map) setBasemap(displaySettings.basemap || 'satellite', true);
+    restoreDzzSession().then(() => {
+        if (map) setBasemap(displaySettings.basemap || 'satellite', true);
+        updateDzzNetworkStatus();
+    });
     initSegControls();
     updateMlNetworkStatus();
+    updateDzzNetworkStatus();
     setTimeout(() => { if (window.map) map.invalidateSize(); }, 50);
 }
 
@@ -1294,6 +1837,8 @@ function switchSidebar(panelId, event) {
    ========================================================= */
 let map, tileSatellite, tileScheme, tileDzz, tileCustom;
 let currentBasemap = 'satellite';
+let tileCustomSig = '';
+let mapCrsCode = 'EPSG:3857';
 
 const AuthTileLayer = L.TileLayer.extend({
     initialize(url, options = {}) {
@@ -1305,6 +1850,10 @@ const AuthTileLayer = L.TileLayer.extend({
         let url = L.TileLayer.prototype.getTileUrl.call(this, coords);
         if (this._authUser) url = url.replaceAll('{user}', encodeURIComponent(this._authUser));
         if (this._authPass) url = url.replaceAll('{pass}', encodeURIComponent(this._authPass));
+        if (url.includes('{TileMatrix}')) {
+            const z = coords.z + (this.options.zoomOffset || 0);
+            url = url.replaceAll('{TileMatrix}', String(z));
+        }
         return url;
     },
     createTile(coords, done) {
@@ -1313,26 +1862,41 @@ const AuthTileLayer = L.TileLayer.extend({
         tile.setAttribute('role', 'presentation');
 
         const url = this.getTileUrl(coords);
+        const proxied = toSameOriginDzzUrl(url);
         const finishOk = () => done(null, tile);
         const finishErr = () => done(new Error('tile error'), tile);
+        const needsAuthFetch = !!(this._authUser || proxied !== url);
+        const isDzzProxy = proxied !== url;
 
-        if (this._authUser) {
-            const header = 'Basic ' + btoa(unescape(encodeURIComponent(`${this._authUser}:${this._authPass || ''}`)));
-            fetch(url, { headers: { Authorization: header }, mode: 'cors', credentials: 'omit' })
-                .then((res) => {
-                    if (!res.ok) throw new Error('TILE_HTTP_' + res.status);
-                    return res.blob();
-                })
-                .then((blob) => {
-                    tile.onload = finishOk;
-                    tile.onerror = finishErr;
-                    tile.src = URL.createObjectURL(blob);
-                })
+        const applyBlob = (blob) => {
+            if (tile._blobUrl) URL.revokeObjectURL(tile._blobUrl);
+            tile._blobUrl = URL.createObjectURL(blob);
+            tile.onload = finishOk;
+            tile.onerror = finishErr;
+            tile.src = tile._blobUrl;
+        };
+
+        const fetchTile = (requestUrl, headers, mode, credentials) =>
+            fetch(requestUrl, { headers, mode, credentials }).then((res) => {
+                if (!res.ok) throw new Error('TILE_HTTP_' + res.status);
+                return res.blob();
+            });
+
+        if (needsAuthFetch) {
+            const headers = {};
+            if (this._authUser && !isDzzProxy) {
+                headers.Authorization = dzzBasicHeader(this._authUser, this._authPass);
+            }
+            fetchTile(proxied, headers, 'cors', 'same-origin')
+                .then(applyBlob)
                 .catch(() => {
-                    tile.onload = finishOk;
-                    tile.onerror = finishErr;
-                    tile.src = url;
-                });
+                    if (isDzzProxy) throw new Error('tile error');
+                    const directHeaders = this._authUser
+                        ? { Authorization: dzzBasicHeader(this._authUser, this._authPass) }
+                        : {};
+                    return fetchTile(url, directHeaders, 'cors', 'omit').then(applyBlob);
+                })
+                .catch(finishErr);
         } else {
             L.DomEvent.on(tile, 'load', L.Util.bind(this._tileOnLoad, this, done, tile));
             L.DomEvent.on(tile, 'error', L.Util.bind(this._tileOnError, this, done, tile));
@@ -1340,6 +1904,931 @@ const AuthTileLayer = L.TileLayer.extend({
         }
         return tile;
     },
+});
+
+const DzzOrthoLayer = L.TileLayer.extend({
+    initialize(url, options = {}) {
+        this._serviceRoot = dzzImageServerRoot(url);
+        this._dzzSig = options.dzzSig || '';
+        L.TileLayer.prototype.initialize.call(this, url, options);
+    },
+    getTileUrl(coords) {
+        let url = L.TileLayer.prototype.getTileUrl.call(this, coords);
+        if (url.includes('{TileMatrix}')) {
+            const z = coords.z + (this.options.zoomOffset || 0);
+            url = url.replaceAll('{TileMatrix}', String(z));
+        }
+        return url;
+    },
+    createTile(coords, done) {
+        const tile = document.createElement('img');
+        tile.alt = '';
+        tile.setAttribute('role', 'presentation');
+        const abort = new AbortController();
+        tile._dzzAbort = abort;
+        let doneOnce = false;
+        const finishOk = () => {
+            if (doneOnce) return;
+            doneOnce = true;
+            done(null, tile);
+        };
+        abort.signal.addEventListener('abort', finishOk, { once: true });
+        const applyBlob = (blob) => {
+            if (abort.signal.aborted) {
+                finishOk();
+                return;
+            }
+            if (!blob || blob.size < 80) {
+                finishOk();
+                tile.src = DZZ_TRANSPARENT_PIXEL;
+                return;
+            }
+            if (tile._blobUrl) URL.revokeObjectURL(tile._blobUrl);
+            tile._blobUrl = URL.createObjectURL(blob);
+            tile.onload = finishOk;
+            tile.onerror = finishOk;
+            tile.src = tile._blobUrl;
+        };
+        const transparent = () => {
+            finishOk();
+            if (abort.signal.aborted) return;
+            tile.src = DZZ_TRANSPARENT_PIXEL;
+        };
+
+        if (!isDzzTileInCoverage(coords)) {
+            transparent();
+            return tile;
+        }
+
+        const z = coords.z;
+        const root = this._serviceRoot;
+        const hiSize = dzzExportPixelSize(z, this._map);
+        const previewKey = dzzPreviewCacheKey(root, coords);
+        const hiKey = dzzHiCacheKey(root, coords, hiSize);
+        let quality = 0;
+
+        const applyIfBetter = (blob, level) => {
+            if (level < quality) return;
+            quality = level;
+            applyBlob(blob);
+        };
+
+        const cachedHi = hiSize > 256 ? dzzCacheGet(hiKey) : null;
+        if (cachedHi) {
+            applyIfBetter(cachedHi, 3);
+            return tile;
+        }
+        const cachedPreview = dzzCacheGet(previewKey);
+        if (cachedPreview) {
+            applyIfBetter(cachedPreview, 2);
+        } else {
+            const ancestor = dzzFindCachedAncestor(root, coords);
+            if (ancestor) {
+                dzzUpscaleFromAncestor(ancestor.blob, ancestor.coords, coords)
+                    .then((blob) => applyIfBetter(blob, 1))
+                    .catch(() => finishOk());
+            } else {
+                finishOk();
+            }
+        }
+
+        if (!cachedPreview) {
+            dzzLoadPreviewBlob(this, coords, 0)
+                .then((blob) => applyIfBetter(blob, 2))
+                .catch(() => { if (quality === 0) transparent(); });
+        }
+
+        if (hiSize > 256) {
+            const hiUrl = dzzExportImageUrl(root, coords, hiSize, 'png');
+            dzzEnsureTileBlob(hiKey, () => dzzFetchResilient(hiUrl, DZZ_TILE_TIMEOUT_MS, null).then((res) => {
+                if (!res.ok) throw new Error('TILE_HTTP_' + res.status);
+                return res.blob();
+            }), 0).then((hi) => applyIfBetter(hi, 3)).catch(() => {});
+        }
+        return tile;
+    },
+    _removeTile(key) {
+        const tile = this._tiles?.[key]?.el;
+        if (tile?._dzzAbort) {
+            try { tile._dzzAbort.abort(); } catch { /* ignore */ }
+        }
+        if (tile?._blobUrl) {
+            URL.revokeObjectURL(tile._blobUrl);
+            tile._blobUrl = '';
+        }
+        return L.TileLayer.prototype._removeTile.call(this, key);
+    },
+});
+
+const DzzTileGridLayer = L.GridLayer.extend({
+    createTile(coords) {
+        const tile = document.createElement('div');
+        tile.className = 'dzz-tile-cell';
+        tile.dataset.z = String(coords.z);
+        tile.dataset.x = String(coords.x);
+        tile.dataset.y = String(coords.y);
+        const label = document.createElement('span');
+        label.textContent = `${coords.z}/${coords.x}/${coords.y}`;
+        tile.appendChild(label);
+        return tile;
+    },
+});
+
+function parseDzzSites(data) {
+    const features = Array.isArray(data?.features) ? data.features : [];
+    return features.map((feat, index) => {
+        const name = feat.attributes?.Name || feat.attributes?.name || `Участок ${index + 1}`;
+        const ring = feat.geometry?.rings?.[0];
+        const bounds = boundsFromRing(ring);
+        if (!bounds || !bounds.isValid()) return null;
+        const center = bounds.getCenter();
+        return {
+            id: String(feat.attributes?.OBJECTID ?? name),
+            name,
+            title: humanizeDzzSiteName(name),
+            lat: center.lat,
+            lng: center.lng,
+            center,
+            bounds,
+        };
+    }).filter(Boolean);
+}
+
+function setDzzConnStatus(text) {
+    const el = document.getElementById('dzz-conn-status');
+    if (el) el.textContent = text || '';
+}
+
+function dzzDockStorageKey() {
+    return 'ttz_dzz_dock_' + getCurrentEmail();
+}
+
+function loadDzzDockState() {
+    try {
+        const saved = JSON.parse(sessionStorage.getItem(dzzDockStorageKey()) || 'null');
+        if (!saved) return;
+        dzzDockMode = saved.mode === 'tiles' ? 'tiles' : 'sites';
+        dzzDockOpen = !!saved.open;
+    } catch { /* ignore */ }
+}
+
+function persistDzzDockState() {
+    sessionStorage.setItem(dzzDockStorageKey(), JSON.stringify({
+        mode: dzzDockMode,
+        open: dzzDockOpen,
+    }));
+}
+
+function updateDzzDockSummary() {
+    const el = document.getElementById('dzz-dock-summary');
+    if (!el) return;
+    if (dzzDockMode === 'tiles' && map) {
+        const t = getMapTileCoords();
+        el.textContent = `${t.z}/${t.x}/${t.y}`;
+        el.title = `Тайл ${t.z}/${t.x}/${t.y}`;
+        return;
+    }
+    const site = dzzSites.find((item) => item.id === dzzActiveSiteId);
+    if (site) {
+        el.textContent = site.title;
+        el.title = site.title;
+        return;
+    }
+    el.textContent = dzzSites.length ? `${dzzSites.length} участок(ов)` : 'dzz.by';
+    el.title = el.textContent;
+}
+
+function applyDzzDockUi() {
+    const bar = document.getElementById('dzz-sites-bar');
+    const sitesTab = document.getElementById('dzz-tab-sites');
+    const tilesTab = document.getElementById('dzz-tab-tiles');
+    const sitesPane = document.getElementById('dzz-sites-pane');
+    const tilesPane = document.getElementById('dzz-tiles-pane');
+    const toggle = document.getElementById('dzz-dock-toggle');
+    const summary = document.getElementById('dzz-dock-summary');
+    if (!bar) return;
+    bar.classList.toggle('is-open', dzzDockOpen);
+    const sitesOn = dzzDockOpen && dzzDockMode === 'sites';
+    const tilesOn = dzzDockOpen && dzzDockMode === 'tiles';
+    if (sitesTab) {
+        sitesTab.classList.toggle('is-active', sitesOn);
+        sitesTab.setAttribute('aria-selected', sitesOn ? 'true' : 'false');
+    }
+    if (tilesTab) {
+        tilesTab.classList.toggle('is-active', tilesOn);
+        tilesTab.setAttribute('aria-selected', tilesOn ? 'true' : 'false');
+    }
+    if (sitesPane) sitesPane.hidden = !sitesOn;
+    if (tilesPane) tilesPane.hidden = !tilesOn;
+    if (toggle) {
+        toggle.setAttribute('aria-expanded', dzzDockOpen ? 'true' : 'false');
+        toggle.title = dzzDockOpen ? 'Свернуть панель' : 'Развернуть панель';
+    }
+    if (summary) summary.title = dzzDockOpen ? 'Свернуть панель' : 'Развернуть панель';
+    updateDzzDockSummary();
+    if (map) setTimeout(() => map.invalidateSize(), 240);
+}
+
+function setDzzDockMode(mode) {
+    const next = mode === 'tiles' ? 'tiles' : 'sites';
+    if (dzzDockOpen && dzzDockMode === next) dzzDockOpen = false;
+    else {
+        dzzDockMode = next;
+        dzzDockOpen = true;
+    }
+    persistDzzDockState();
+    applyDzzDockUi();
+}
+
+function toggleDzzDock() {
+    dzzDockOpen = !dzzDockOpen;
+    persistDzzDockState();
+    applyDzzDockUi();
+}
+
+function revealDzzDock(mode) {
+    dzzDockMode = mode === 'tiles' ? 'tiles' : 'sites';
+    dzzDockOpen = true;
+    persistDzzDockState();
+    applyDzzDockUi();
+}
+
+function renderDzzSites() {
+    const bar = document.getElementById('dzz-sites-bar');
+    const list = document.getElementById('dzz-sites-list');
+    const settingsWrap = document.getElementById('dzz-sites-settings');
+    const settingsList = document.getElementById('dzz-sites-settings-list');
+    const visible = currentBasemap === 'dzz';
+
+    if (bar) {
+        bar.hidden = !visible;
+        bar.classList.toggle('is-visible', visible);
+        if (visible) {
+            if (!bar.dataset.dockReady) {
+                loadDzzDockState();
+                bar.dataset.dockReady = '1';
+            }
+            applyDzzDockUi();
+        } else {
+            bar.classList.remove('is-open');
+            delete bar.dataset.dockReady;
+        }
+    }
+    if (settingsWrap) settingsWrap.hidden = dzzSites.length === 0;
+
+    const chipHtml = dzzSites.length
+        ? dzzSites.map((site) => {
+            const active = site.id === dzzActiveSiteId ? ' is-active' : '';
+            const coords = formatDzzCoords(site.lat, site.lng);
+            return `<button type="button" class="dzz-site-chip${active}" data-dzz-site="${escapeHtml(site.id)}" title="${escapeHtml(site.title)}">
+            <strong>${escapeHtml(site.title)}</strong>
+            <small>${escapeHtml(coords)}</small>
+        </button>`;
+        }).join('')
+        : '<span class="dzz-dock-empty">Участки появятся после загрузки покрытия</span>';
+    if (list) list.innerHTML = chipHtml;
+
+    if (settingsList) {
+        settingsList.innerHTML = dzzSites.map((site) => {
+            const active = site.id === dzzActiveSiteId ? ' is-active' : '';
+            return `<div class="dzz-site-row${active}" data-dzz-site="${escapeHtml(site.id)}">
+                <div class="dzz-site-row-text">
+                    <strong>${escapeHtml(site.title)}</strong>
+                    <small>${escapeHtml(formatDzzCoords(site.lat, site.lng))}</small>
+                </div>
+                <span class="dzz-site-row-go">Перейти</span>
+            </div>`;
+        }).join('');
+    }
+
+    applyDzzTileGridLayer();
+    updateDzzDockSummary();
+    if (map && visible) setTimeout(() => map.invalidateSize(), 50);
+}
+
+function hideDzzSites() {
+    dzzSites = [];
+    dzzActiveSiteId = '';
+    renderDzzSites();
+}
+
+function disconnectDzz() {
+    apiFetch('/api/dzz/disconnect', { method: 'POST' }).catch(() => {});
+    dzzSession.connected = false;
+    const loginEl = document.getElementById('opt-dzz-login');
+    const passwordEl = document.getElementById('opt-dzz-password');
+    const basemapEl = document.getElementById('opt-basemap');
+    if (loginEl) loginEl.value = '';
+    if (passwordEl) passwordEl.value = '';
+    if (basemapEl) basemapEl.value = 'satellite';
+    hideDzzSites();
+    setDzzConnStatus('Сессия dzz.by завершена. Можно работать с обычной картой.');
+    displaySettings.basemap = 'satellite';
+    readBasemapExtraFromForm();
+    localStorage.setItem(displaySettingsKey(), JSON.stringify(displaySettings));
+    persistBasemapExtra();
+    setBasemap('satellite', true);
+    applyDzzTileGridLayer();
+    updateDzzNetworkStatus();
+    logAction('tool', 'Выход из dzz.by, возврат к обычной карте');
+    showToast('Вышли из dzz.by. Открыта обычная карта');
+}
+
+function goToDzzSite(siteId, silent = false) {
+    const site = dzzSites.find((item) => String(item.id) === String(siteId));
+    if (!site || !map) return;
+    dzzActiveSiteId = site.id;
+    renderDzzSites();
+    if (!silent) revealDzzDock('sites');
+    const zoom = Math.min(18, Math.max(DZZ_VIEW_ZOOM, Math.round(map.getZoom())));
+    map.flyTo(site.center, zoom, { duration: 0.75 });
+    if (!silent) {
+        showToast(`Переход: ${site.title}`);
+        logAction('tool', `Переход к участку dzz.by: ${site.title}`);
+    }
+}
+
+function dzzTileInputsFocused() {
+    const ids = ['opt-dzz-tile-z', 'opt-dzz-tile-x', 'opt-dzz-tile-y', 'dzz-bar-z', 'dzz-bar-x', 'dzz-bar-y'];
+    return ids.some((id) => document.activeElement?.id === id);
+}
+
+function currentMapCrs() {
+    return mapCrsCode === 'EPSG:4326' ? 'EPSG:4326' : 'EPSG:3857';
+}
+
+function leafletCrsFor(code) {
+    return code === 'EPSG:4326' ? L.CRS.EPSG4326 : L.CRS.EPSG3857;
+}
+
+function tileGridSize(z) {
+    const zoom = Math.max(0, Math.round(Number(z) || 0));
+    if (currentMapCrs() === 'EPSG:4326') {
+        return { nx: 2 ** (zoom + 1), ny: 2 ** zoom };
+    }
+    const n = 2 ** zoom;
+    return { nx: n, ny: n };
+}
+
+function wantedCrsForBasemap(value) {
+    if (value === 'custom') {
+        const url = String(basemapExtra.customUrl || '');
+        if (/GoogleCRS84Quad/i.test(url)) return 'EPSG:4326';
+        if (basemapExtra.customCrs === 'EPSG:4326' && /WMTS/i.test(url) && !/GoogleMapsCompatible|3857/i.test(url)) {
+            return 'EPSG:4326';
+        }
+        return 'EPSG:3857';
+    }
+    return 'EPSG:3857';
+}
+
+function updateCrsDisplay() {
+    const el = document.getElementById('crs-display');
+    if (el) el.textContent = currentMapCrs();
+}
+
+function getMapTileCoords(latlng, zoom) {
+    if (!map) return { z: 0, x: 0, y: 0 };
+    const z = Math.max(0, Math.min(22, Math.round(zoom != null ? zoom : map.getZoom())));
+    const p = map.project(latlng || map.getCenter(), z);
+    const { nx, ny } = tileGridSize(z);
+    return {
+        z,
+        x: Math.min(nx - 1, Math.max(0, Math.floor(p.x / 256))),
+        y: Math.min(ny - 1, Math.max(0, Math.floor(p.y / 256))),
+    };
+}
+
+function dzzTileCenterLatLng(z, x, y) {
+    return map.unproject(L.point((x + 0.5) * 256, (y + 0.5) * 256), z);
+}
+
+function fillDzzTileForm(z, x, y) {
+    const pairs = [
+        ['opt-dzz-tile-z', z],
+        ['dzz-bar-z', z],
+        ['opt-dzz-tile-x', x],
+        ['dzz-bar-x', x],
+        ['opt-dzz-tile-y', y],
+        ['dzz-bar-y', y],
+    ];
+    pairs.forEach(([id, value]) => {
+        const el = document.getElementById(id);
+        if (el && document.activeElement !== el) el.value = String(value);
+    });
+}
+
+function updateTileDisplay(latlng) {
+    const el = document.getElementById('tile-display');
+    if (!el || !map) return;
+    const t = getMapTileCoords(latlng, map.getZoom());
+    el.textContent = `z/x/y ${t.z}/${t.x}/${t.y}`;
+}
+
+function highlightCenterTile() {
+    if (!dzzTileGridLayer || !map) return;
+    const t = getMapTileCoords();
+    const root = dzzTileGridLayer._container;
+    if (!root) return;
+    root.querySelectorAll('.dzz-tile-cell.is-center').forEach((el) => el.classList.remove('is-center'));
+    root.querySelectorAll(`.dzz-tile-cell[data-z="${t.z}"][data-x="${t.x}"][data-y="${t.y}"]`).forEach((el) => {
+        el.classList.add('is-center');
+    });
+}
+
+function updateDzzTileHud() {
+    if (!map) return;
+    const t = getMapTileCoords();
+    updateTileDisplay(map.getCenter());
+    const current = document.getElementById('dzz-tile-current');
+    if (current) current.textContent = `Текущий тайл: ${t.z}/${t.x}/${t.y}`;
+    if (!dzzTileInputsFocused()) fillDzzTileForm(t.z, t.x, t.y);
+    highlightCenterTile();
+    updateDzzDockSummary();
+}
+
+function readDzzTileForm() {
+    const num = (id) => {
+        const el = document.getElementById(id);
+        return el && el.value !== '' ? Number(el.value) : NaN;
+    };
+    const z = Number.isFinite(num('dzz-bar-z')) ? num('dzz-bar-z') : num('opt-dzz-tile-z');
+    const x = Number.isFinite(num('dzz-bar-x')) ? num('dzz-bar-x') : num('opt-dzz-tile-x');
+    const y = Number.isFinite(num('dzz-bar-y')) ? num('dzz-bar-y') : num('opt-dzz-tile-y');
+    return { z, x, y };
+}
+
+function goToDzzTile(z, x, y, silent = false) {
+    if (!map) return;
+    z = Math.round(Number(z));
+    x = Math.round(Number(x));
+    y = Math.round(Number(y));
+    const { nx, ny } = tileGridSize(z);
+    if (!Number.isFinite(z) || z < 0 || z > 22) {
+        showToast('Укажите зум z от 0 до 22');
+        return;
+    }
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= nx || y >= ny) {
+        showToast(`Для z=${z} индекс: x 0…${nx - 1}, y 0…${ny - 1}`);
+        return;
+    }
+    dzzActiveSiteId = '';
+    renderDzzSites();
+    fillDzzTileForm(z, x, y);
+    map.setView(dzzTileCenterLatLng(z, x, y), z, { animate: true });
+    highlightCenterTile();
+    if (!silent) {
+        revealDzzDock('tiles');
+        showToast(`Тайл ${z}/${x}/${y}`);
+        logAction('tool', `Переход к тайлу ${z}/${x}/${y}`);
+    }
+}
+
+function goToDzzTileFromForm() {
+    const t = readDzzTileForm();
+    goToDzzTile(t.z, t.x, t.y);
+}
+
+function shiftDzzTile(dx, dy) {
+    const t = getMapTileCoords();
+    const { nx, ny } = tileGridSize(t.z);
+    const x = ((t.x + dx) % nx + nx) % nx;
+    const y = Math.min(ny - 1, Math.max(0, t.y + dy));
+    goToDzzTile(t.z, x, y);
+}
+
+function applyDzzTileGridLayer() {
+    if (!map) return;
+    const show = dzzTileGridOn && currentBasemap === 'dzz';
+    const btn = document.getElementById('dzz-grid-toggle');
+    const chk = document.getElementById('opt-dzz-tile-grid');
+    if (btn) {
+        btn.classList.toggle('is-active', dzzTileGridOn);
+        btn.setAttribute('aria-pressed', dzzTileGridOn ? 'true' : 'false');
+    }
+    if (chk) chk.checked = dzzTileGridOn;
+    if (show) {
+        if (!dzzTileGridLayer) {
+            dzzTileGridLayer = new DzzTileGridLayer({
+                pane: 'dzzGridPane',
+                tileSize: 256,
+                minZoom: 3,
+                maxZoom: 22,
+                zIndex: 3,
+            });
+        }
+        if (!map.hasLayer(dzzTileGridLayer)) dzzTileGridLayer.addTo(map);
+        setTimeout(highlightCenterTile, 50);
+    } else if (dzzTileGridLayer && map.hasLayer(dzzTileGridLayer)) {
+        map.removeLayer(dzzTileGridLayer);
+    }
+}
+
+function setDzzTileGrid(on) {
+    dzzTileGridOn = !!on;
+    applyDzzTileGridLayer();
+}
+
+function toggleDzzTileGrid() {
+    setDzzTileGrid(!dzzTileGridOn);
+}
+
+function bindDzzTileFormSync() {
+    ['z', 'x', 'y'].forEach((axis) => {
+        const a = document.getElementById(`opt-dzz-tile-${axis}`);
+        const b = document.getElementById(`dzz-bar-${axis}`);
+        const sync = (from, to) => {
+            if (!from || !to || from.dataset.syncBound) return;
+            from.dataset.syncBound = '1';
+            from.addEventListener('input', () => { to.value = from.value; });
+            from.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    goToDzzTileFromForm();
+                }
+            });
+        };
+        sync(a, b);
+        sync(b, a);
+    });
+}
+
+function focusDzzCoverage() {
+    if (!map || !dzzSites.length) return;
+    const view = map.getBounds();
+    const visible = dzzSites.some((site) => view.intersects(site.bounds));
+    if (visible) return;
+    if (dzzSites.length === 1) {
+        goToDzzSite(dzzSites[0].id, true);
+        return;
+    }
+    const all = L.latLngBounds(dzzSites[0].bounds);
+    dzzSites.slice(1).forEach((site) => all.extend(site.bounds));
+    map.fitBounds(all.pad(0.2), { maxZoom: 14, padding: [48, 48], animate: true });
+}
+
+async function loadDzzSites(urlTemplate, opts = {}) {
+    const { silent = false, focus = true } = opts;
+    const requestId = ++dzzSitesRequestId;
+    const root = dzzImageServerRoot(urlTemplate || DZZ_DEFAULT_TILE_URL);
+    const query = `${root}/query?where=1%3D1&outFields=Name&returnGeometry=true&outSR=4326&f=json`;
+    try {
+        const res = await dzzFetchResilient(query, DZZ_TILE_TIMEOUT_MS);
+        if (requestId !== dzzSitesRequestId) return false;
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error.message || 'DZZ_QUERY');
+        dzzSites = parseDzzSites(data);
+        dzzActiveSiteId = '';
+        renderDzzSites();
+        if (tileDzz && dzzSites.length) {
+            const all = L.latLngBounds(dzzSites[0].bounds);
+            dzzSites.slice(1).forEach((site) => all.extend(site.bounds));
+            tileDzz.options.bounds = all.pad(0.05);
+        }
+        if (focus) focusDzzCoverage();
+        setDzzConnStatus(dzzSites.length
+            ? `Подключено: ${dzzSites.length} участок(ов) ортофото`
+            : 'Подключение есть, но каталог участков пуст');
+        if (!silent && dzzSites.length) showToast(`Найдено участков dzz.by: ${dzzSites.length}`);
+        return true;
+    } catch (err) {
+        if (requestId !== dzzSitesRequestId) return false;
+        dzzSites = [];
+        renderDzzSites();
+        setDzzConnStatus('Не удалось загрузить участки dzz.by');
+        if (!silent) showToast('Не удалось получить участки dzz.by');
+        console.warn(err);
+        return false;
+    }
+}
+
+function dzzErrorMessage(err) {
+    if (err?.code === 'INVALID_CREDENTIALS') return 'Неверные логин или пароль dzz.by';
+    if (err?.code === 'INVALID_URL') return 'Некорректный адрес подключения. Укажите URL ImageServer dzz.by';
+    if (err?.code === 'MISSING_CREDENTIALS') return 'Укажите логин, пароль и адрес подключения';
+    if (err?.code === 'DZZ_NOT_CONNECTED') return 'Сначала проверьте подключение к dzz.by';
+    if (err?.code === 'WMTS_FETCH_FAILED' || err?.code === 'WMTS_PARSE' || err?.code === 'NO_CONTENTS') {
+        return err.message || 'Не удалось разобрать WMTSCapabilities.xml';
+    }
+    if (err?.code === 'WMTS_TOO_LARGE') return 'WMTSCapabilities.xml слишком большой';
+    if (err?.code === 'SERVICE_UNAVAILABLE') return 'Сервис dzz.by недоступен. Попробуйте позже.';
+    if (err?.code === 'TLS_ERROR') return 'Не удалось проверить сертификат dzz.by. Перезапустите сервер командой npm start.';
+    if (isNetworkAuthError(err) || err?.status >= 500) {
+        return 'Сервис dzz.by недоступен. Проверьте запуск сервера приложения и попробуйте позже.';
+    }
+    if (err?.message && !/^[A-Z_]+$/.test(err.message)) return err.message;
+    return 'Не удалось подключиться к dzz.by';
+}
+
+let wmtsCatalog = { dzz: null, custom: null };
+
+function wmtsPrefix(source) {
+    return source === 'dzz' ? 'opt-dzz-wmts' : 'opt-custom-wmts';
+}
+
+function wmtsMatrixLabel(matrix) {
+    const bits = [matrix.id];
+    if (matrix.wellKnown && matrix.wellKnown !== matrix.id) bits.push(matrix.wellKnown);
+    if (matrix.crs) bits.push(matrix.crs);
+    if (matrix.httpStatus === 520) bits.push('нет (520)');
+    else if (matrix.reachable === false) bits.push('недоступна');
+    else if (matrix.supported === false) bits.push('другая CRS');
+    return bits.join(' · ');
+}
+
+function buildWmtsRestUrlClient(layer, matrix, styleId) {
+    const format = (layer.formats || []).find((item) => /png/i.test(item)) || layer.formats?.[0] || 'image/png';
+    const resource = (layer.resourceUrls || []).find((item) => item.resourceType === 'tile' && item.format === format)
+        || (layer.resourceUrls || []).find((item) => item.resourceType === 'tile')
+        || (layer.resourceUrls || [])[0];
+    let template = resource?.template || layer.fallbackTemplate || '';
+    if (!template) return '';
+    const style = styleId || layer.defaultStyle || 'default';
+    template = template
+        .replaceAll('{Style}', style)
+        .replaceAll('{style}', style)
+        .replaceAll('{TileMatrixSet}', matrix.id)
+        .replaceAll('{tileMatrixSet}', matrix.id)
+        .replaceAll('{Layer}', layer.id)
+        .replaceAll('{layer}', layer.id)
+        .replaceAll('{Format}', format)
+        .replaceAll('{format}', format)
+        .replaceAll('{TileRow}', '{y}')
+        .replaceAll('{TileCol}', '{x}')
+        .replaceAll('{tileRow}', '{y}')
+        .replaceAll('{tileCol}', '{x}');
+    const token = matrix.tileMatrixPlaceholder && matrix.tileMatrixPlaceholder !== '{TileMatrix}'
+        ? matrix.tileMatrixPlaceholder
+        : (matrix.numericIds !== false ? '{z}' : '{TileMatrix}');
+    template = template.replaceAll('{TileMatrix}', token).replaceAll('{tileMatrix}', token);
+    return template;
+}
+
+function currentWmtsLayer(source) {
+    const data = wmtsCatalog[source];
+    if (!data) return null;
+    const id = document.getElementById(`${wmtsPrefix(source)}-layer`)?.value || data.suggested?.layerId;
+    return data.layers.find((layer) => layer.id === id) || data.layers[0] || null;
+}
+
+function updateWmtsHint(source) {
+    const data = wmtsCatalog[source];
+    const layer = currentWmtsLayer(source);
+    const hint = document.getElementById(`${wmtsPrefix(source)}-hint`);
+    if (!hint || !data || !layer) return;
+    const matrixId = document.getElementById(`${wmtsPrefix(source)}-matrix`)?.value;
+    const matrix = data.tileMatrixSets.find((item) => item.id === matrixId);
+    if (!matrix) {
+        hint.textContent = '';
+        return;
+    }
+    if (matrix.wellKnown === 'GoogleMapsCompatible' && (source === 'dzz' || matrix.httpStatus === 520)) {
+        hint.textContent = 'GoogleMapsCompatible: dzz.by отвечает 520, этой матрицы нет. Можно выбрать, но готовые тайлы не придут — ортофото пойдёт через exportImage.';
+        return;
+    }
+    if (!matrix.supported) {
+        hint.textContent = `Проекция ${matrix.crs}. Нужны EPSG:3857 или EPSG:4326.`;
+        return;
+    }
+    if (matrix.crs === 'EPSG:4326') {
+        if (source === 'dzz') {
+            hint.textContent = 'EPSG:4326: dzz.by остаётся в Web Mercator. Эту матрицу не применяйте.';
+            return;
+        }
+        hint.textContent = `EPSG:4326 (градусы): карта переключится из Web Mercator. Смещение зума ${matrix.zoomOffset}, уровни ${matrix.minNativeZoom}–${matrix.maxNativeZoom}.`;
+        return;
+    }
+    hint.textContent = `REST {z}/{y}/{x}, смещение зума ${matrix.zoomOffset}, уровни ${matrix.minNativeZoom}–${matrix.maxNativeZoom}.`;
+}
+
+function renderWmtsMatrixAndStyle(source) {
+    const data = wmtsCatalog[source];
+    const layer = currentWmtsLayer(source);
+    const prefix = wmtsPrefix(source);
+    const matrixSel = document.getElementById(`${prefix}-matrix`);
+    const styleSel = document.getElementById(`${prefix}-style`);
+    if (!data || !layer) return;
+    const setById = new Map(data.tileMatrixSets.map((item) => [item.id, item]));
+    const matrices = (layer.tileMatrixSetIds?.length ? layer.tileMatrixSetIds : data.tileMatrixSets.map((item) => item.id))
+        .map((id) => setById.get(id))
+        .filter(Boolean);
+    const suggestedId = data.suggested?.matrixSetId;
+    if (matrixSel) {
+        matrixSel.innerHTML = matrices.map((matrix) => {
+            const selected = matrix.id === suggestedId ? ' selected' : '';
+            return `<option value="${escapeHtml(matrix.id)}"${selected}>${escapeHtml(wmtsMatrixLabel(matrix))}</option>`;
+        }).join('');
+    }
+    if (styleSel) {
+        const styles = layer.styles?.length ? layer.styles : [{ id: layer.defaultStyle || 'default', title: 'default' }];
+        styleSel.innerHTML = styles.map((style) => {
+            const selected = style.id === (data.suggested?.styleId || layer.defaultStyle) ? ' selected' : '';
+            return `<option value="${escapeHtml(style.id)}"${selected}>${escapeHtml(style.title || style.id)}</option>`;
+        }).join('');
+    }
+    updateWmtsHint(source);
+}
+
+function fillWmtsSelects(source) {
+    const data = wmtsCatalog[source];
+    const panel = document.getElementById(source === 'dzz' ? 'dzz-wmts-panel' : 'custom-wmts-panel');
+    if (panel) panel.hidden = !data?.layers?.length;
+    if (!data?.layers?.length) return;
+    const layerSel = document.getElementById(`${wmtsPrefix(source)}-layer`);
+    const suggested = data.suggested || {};
+    if (layerSel) {
+        layerSel.innerHTML = data.layers.map((layer) => {
+            const selected = layer.id === suggested.layerId ? ' selected' : '';
+            return `<option value="${escapeHtml(layer.id)}"${selected}>${escapeHtml(layer.title || layer.id)}</option>`;
+        }).join('');
+    }
+    renderWmtsMatrixAndStyle(source);
+}
+
+function onWmtsLayerChange(source) {
+    renderWmtsMatrixAndStyle(source);
+}
+
+function onWmtsMatrixChange(source) {
+    updateWmtsHint(source);
+}
+
+async function loadWmtsCatalog(source, opts = {}) {
+    const silent = !!opts.silent;
+    const isDzz = source === 'dzz';
+    const url = isDzz
+        ? (document.getElementById('opt-dzz-url')?.value.trim() || basemapExtra.dzzUrl || DZZ_DEFAULT_SERVICE)
+        : (document.getElementById('opt-custom-basemap-url')?.value.trim() || basemapExtra.customUrl);
+    const statusEl = document.getElementById(isDzz ? 'dzz-wmts-status' : 'custom-wmts-status');
+    const setStatus = (text) => { if (statusEl) statusEl.textContent = text || ''; };
+    if (!url) {
+        setStatus('Укажите адрес сервиса');
+        if (!silent) showToast('Укажите адрес WMTS или ImageServer');
+        return null;
+    }
+    if (isDzz && !dzzSession.connected) {
+        setStatus('Сначала проверьте подключение к dzz.by');
+        if (!silent) showToast('Сначала проверьте подключение к dzz.by');
+        return null;
+    }
+    setStatus('Загрузка WMTSCapabilities.xml…');
+    try {
+        const body = { url };
+        if (!isDzz) {
+            body.login = document.getElementById('opt-custom-basemap-login')?.value.trim() || '';
+            body.password = document.getElementById('opt-custom-basemap-password')?.value || '';
+        }
+        const data = await apiFetch('/api/wmts/capabilities', {
+            method: 'POST',
+            body: JSON.stringify(body),
+        });
+        wmtsCatalog[source] = data;
+        fillWmtsSelects(source);
+        setStatus(data.suggested?.warning || `Слоёв: ${data.layers.length}, матриц: ${data.tileMatrixSets.length}`);
+        return data;
+    } catch (err) {
+        wmtsCatalog[source] = null;
+        fillWmtsSelects(source);
+        const msg = dzzErrorMessage(err);
+        setStatus(msg);
+        if (!silent) showToast(msg);
+        return null;
+    }
+}
+
+function applyWmtsSelection(source) {
+    const data = wmtsCatalog[source];
+    const layer = currentWmtsLayer(source);
+    if (!data || !layer) {
+        showToast('Сначала загрузите WMTSCapabilities.xml');
+        return;
+    }
+    const prefix = wmtsPrefix(source);
+    const matrixId = document.getElementById(`${prefix}-matrix`)?.value;
+    const styleId = document.getElementById(`${prefix}-style`)?.value || layer.defaultStyle;
+    const matrix = data.tileMatrixSets.find((item) => item.id === matrixId);
+    if (!matrix) {
+        showToast('Выберите матрицу тайлов');
+        return;
+    }
+    if (!matrix.supported) {
+        showToast('Эта матрица не EPSG:3857 и не EPSG:4326.');
+        return;
+    }
+    if (source === 'dzz' && matrix.crs === 'EPSG:4326') {
+        showToast('dzz.by работает только в Web Mercator (EPSG:3857).');
+        return;
+    }
+    const tileUrl = buildWmtsRestUrlClient(layer, matrix, styleId);
+    if (!tileUrl || (!tileUrl.includes('{z}') && !tileUrl.includes('{TileMatrix}'))) {
+        showToast('Не удалось собрать REST URL тайлов');
+        return;
+    }
+    if (matrix.wellKnown === 'GoogleMapsCompatible' && source === 'dzz') {
+        showToast('GoogleMapsCompatible у dzz.by отвечает 520. Тайлы этой матрицы не придут.');
+    }
+    if (source === 'dzz') {
+        const urlEl = document.getElementById('opt-dzz-url');
+        if (urlEl) urlEl.value = tileUrl;
+        basemapExtra.dzzUrl = tileUrl;
+        persistBasemapExtra();
+        if (dzzSession.connected) setBasemap('dzz', true);
+        setDzzConnStatus(`WMTS: ${layer.title || layer.id} / ${matrix.id}`);
+    } else {
+        const urlEl = document.getElementById('opt-custom-basemap-url');
+        if (urlEl) urlEl.value = tileUrl;
+        const nameEl = document.getElementById('opt-custom-basemap-name');
+        if (nameEl && !nameEl.value.trim()) nameEl.value = layer.title || 'WMTS';
+        basemapExtra.customCrs = matrix.crs === 'EPSG:4326' ? 'EPSG:4326' : 'EPSG:3857';
+        basemapExtra.customZoomOffset = Number.isFinite(matrix.zoomOffset) ? matrix.zoomOffset : 0;
+        basemapExtra.customMinNativeZoom = Number.isFinite(matrix.minNativeZoom) ? matrix.minNativeZoom : 0;
+        basemapExtra.customMaxNativeZoom = Number.isFinite(matrix.maxNativeZoom) ? matrix.maxNativeZoom : 19;
+        readBasemapExtraFromForm();
+        persistBasemapExtra();
+        const select = document.getElementById('opt-basemap');
+        if (select) select.value = 'custom';
+        displaySettings.basemap = 'custom';
+        setBasemap('custom');
+    }
+    if (!(matrix.wellKnown === 'GoogleMapsCompatible' && source === 'dzz')) {
+        const crsNote = matrix.crs === 'EPSG:4326' ? ' · карта в EPSG:4326' : '';
+        showToast(`WMTS: ${matrix.id}${crsNote}`);
+    }
+    logAction('tool', `WMTS слой ${layer.id}, матрица ${matrix.id}`);
+}
+
+async function restoreDzzSession(opts = {}) {
+    const skipHealth = !!opts.skipHealth;
+    try {
+        const data = await apiFetch('/api/dzz/status');
+        dzzSession.connected = !!data.connected;
+        if (data.url) {
+            const current = document.getElementById('opt-dzz-url')?.value.trim() || basemapExtra.dzzUrl || '';
+            const keepWmts = /\/WMTS\/tile\//i.test(current);
+            if (!keepWmts) {
+                basemapExtra.dzzUrl = data.url;
+                const urlEl = document.getElementById('opt-dzz-url');
+                if (urlEl) urlEl.value = data.url;
+            }
+        }
+        if (dzzSession.connected) {
+            setDzzConnStatus('Сессия dzz.by активна на сервере');
+            loadWmtsCatalog('dzz', { silent: true });
+        }
+    } catch {
+        // Сервер мог быть перезапущен: cookie и диск ещё поднимут сессию.
+    }
+    if (!skipHealth) updateDzzNetworkStatus();
+    return dzzSession.connected;
+}
+
+async function testDzzAccess() {
+    const login = (document.getElementById('opt-dzz-login')?.value || '').trim();
+    const password = document.getElementById('opt-dzz-password')?.value || '';
+    const url = (document.getElementById('opt-dzz-url')?.value || '').trim() || DZZ_DEFAULT_TILE_URL;
+    if (!login || !password) {
+        setDzzConnStatus('Укажите логин и пароль dzz.by');
+        showToast('Укажите логин и пароль dzz.by');
+        return false;
+    }
+    setDzzConnStatus('Проверка подключения…');
+    try {
+        const data = await apiFetch('/api/dzz/connect', {
+            method: 'POST',
+            body: JSON.stringify({ login, password, url }),
+        });
+        const passwordEl = document.getElementById('opt-dzz-password');
+        if (passwordEl) passwordEl.value = '';
+        dzzSession.connected = true;
+        basemapExtra.dzzUrl = data.url || resolveDzzTileTemplate(url).url;
+        const urlEl = document.getElementById('opt-dzz-url');
+        if (urlEl) urlEl.value = basemapExtra.dzzUrl;
+        persistBasemapExtra();
+        const select = document.getElementById('opt-basemap');
+        if (select) select.value = 'dzz';
+        displaySettings.basemap = 'dzz';
+        localStorage.setItem(displaySettingsKey(), JSON.stringify(displaySettings));
+        setBasemap('dzz', true);
+        updateDzzNetworkStatus();
+        showToast('Ортофото dzz.by подключено');
+        loadWmtsCatalog('dzz', { silent: true });
+        return true;
+    } catch (err) {
+        dzzSession.connected = false;
+        const msg = dzzErrorMessage(err);
+        setDzzConnStatus(msg);
+        showToast(msg);
+        const select = document.getElementById('opt-basemap');
+        if (select && currentBasemap !== 'dzz') select.value = currentBasemap || 'satellite';
+        return false;
+    }
+}
+
+document.addEventListener('click', (e) => {
+    const target = e.target.closest('[data-dzz-site]');
+    if (!target) return;
+    goToDzzSite(target.getAttribute('data-dzz-site'));
 });
 let layersRegistry = [];
 let foldersRegistry = [];
@@ -1438,12 +2927,15 @@ function getMapGeoBounds() {
     };
 }
 
-/** Пиксели снимка → lat/lng через Web Mercator (EPSG:3857). */
+/** Пиксели снимка → lat/lng в CRS захвата (3857 или 4326). */
 function pixelRingToLatLng(ring, imageHw, geoBounds) {
     const [h, w] = imageHw;
     const dh = Math.max(1, h - 1);
     const dw = Math.max(1, w - 1);
-    const crs = L.CRS.EPSG3857;
+    const captureCrs = lastMapCapture?.mode === 'dzz-export'
+        ? 'EPSG:3857'
+        : (lastMapCapture?.crs || currentMapCrs());
+    const crs = captureCrs === 'EPSG:4326' ? L.CRS.EPSG4326 : L.CRS.EPSG3857;
     const topLeft = crs.project(L.latLng(geoBounds.north, geoBounds.west));
     const bottomRight = crs.project(L.latLng(geoBounds.south, geoBounds.east));
     return ring.map(([x, y]) => {
@@ -1587,6 +3079,7 @@ function startAoiSelection() {
         aoiLayer.addTo(map);
         aoiBounds = aoiLayer.getBounds();
         aoiDrawHandler = null;
+        raiseWorkingOverlays();
         updateAoiStatus();
         showToast('Область выделена');
         logAction('tool', 'Область сегментации выделена');
@@ -1597,12 +3090,28 @@ const MAP_CAPTURE_TILE = 256;
 const MAP_CAPTURE_MAX_EDGE = 2048;
 const MAP_CAPTURE_MAX_ZOOM = 18;
 
-function getActiveBasemapTileUrl(z, x, y) {
-    if (tileScheme && map.hasLayer(tileScheme)) {
+function getActiveBasemapTileUrl(z, x, y, forceEsri = false) {
+    if (!forceEsri && currentBasemap === 'scheme') {
         const s = ['a', 'b', 'c'][(x + y) % 3];
         return `https://${s}.tile.openstreetmap.org/${z}/${x}/${y}.png`;
     }
-    // dzz/custom часто с auth/CORS — для ML-снимка используем Esri
+    if (!forceEsri && currentBasemap === 'dzz') {
+        const root = dzzImageServerRoot(basemapExtra.dzzUrl);
+        if (z > DZZ_CACHE_MAX_Z || z < DZZ_CACHE_MIN_Z) {
+            return dzzExportImageUrl(root, { z, x, y }, 256, 'png');
+        }
+        const serviceZ = z - 8;
+        if (serviceZ >= 0) return `${root}/tile/${serviceZ}/${y}/${x}`;
+    }
+    if (!forceEsri && currentBasemap === 'custom' && basemapExtra.customUrl) {
+        const resolved = resolveXyzTileTemplate(basemapExtra.customUrl);
+        const serviceZ = z + (resolved?.zoomOffset || 0);
+        return (resolved?.url || '')
+            .replaceAll('{z}', String(serviceZ))
+            .replaceAll('{x}', String(x))
+            .replaceAll('{y}', String(y));
+    }
+    if (forceEsri && currentMapCrs() === 'EPSG:4326') return '';
     return `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
 }
 
@@ -1614,6 +3123,28 @@ function loadCorsImage(url) {
         img.onerror = () => reject(new Error(`Не удалось загрузить тайл: ${url}`));
         img.src = url;
     });
+}
+
+function loadCaptureTileImage(url) {
+    if (currentBasemap !== 'dzz') return loadCorsImage(url);
+    return dzzFetchResilient(url, DZZ_TILE_TIMEOUT_MS)
+        .then((res) => {
+            if (!res.ok) throw new Error('TILE_HTTP_' + res.status);
+            return res.blob();
+        })
+        .then((blob) => new Promise((resolve, reject) => {
+            const img = new Image();
+            const obj = URL.createObjectURL(blob);
+            img.onload = () => {
+                URL.revokeObjectURL(obj);
+                resolve(img);
+            };
+            img.onerror = () => {
+                URL.revokeObjectURL(obj);
+                reject(new Error('dzz tile'));
+            };
+            img.src = obj;
+        }));
 }
 
 function chooseCaptureZoom(bounds) {
@@ -1635,6 +3166,40 @@ function chooseCaptureZoom(bounds) {
     return z;
 }
 
+async function captureDzzRegionAsFile(bounds) {
+    const root = dzzImageServerRoot(basemapExtra.dzzUrl);
+    const sw = L.CRS.EPSG3857.project(bounds.getSouthWest());
+    const ne = L.CRS.EPSG3857.project(bounds.getNorthEast());
+    const xmin = Math.min(sw.x, ne.x);
+    const xmax = Math.max(sw.x, ne.x);
+    const ymin = Math.min(sw.y, ne.y);
+    const ymax = Math.max(sw.y, ne.y);
+    const aspect = (xmax - xmin) / Math.max(1, ymax - ymin);
+    let w = MAP_CAPTURE_MAX_EDGE;
+    let h = MAP_CAPTURE_MAX_EDGE;
+    if (aspect >= 1) h = Math.max(64, Math.round(w / aspect));
+    else w = Math.max(64, Math.round(h * aspect));
+    const url = `${root}/exportImage?bbox=${xmin},${ymin},${xmax},${ymax}&bboxSR=3857&imageSR=3857&size=${w},${h}&format=jpg&f=image`;
+    const res = await dzzFetchResilient(url, DZZ_CAPTURE_TIMEOUT_MS);
+    if (!res.ok) throw new Error('DZZ_CAPTURE_' + res.status);
+    const blob = await res.blob();
+    if (!blob || blob.size < 400) throw new Error('DZZ_CAPTURE_EMPTY');
+    lastMapCapture = {
+        mode: 'dzz-export',
+        zoom: map.getZoom(),
+        crs: 'EPSG:3857',
+        width: w,
+        height: h,
+        geoBounds: {
+            north: bounds.getNorth(),
+            south: bounds.getSouth(),
+            west: bounds.getWest(),
+            east: bounds.getEast(),
+        },
+    };
+    return new File([blob], `map_aoi_dzz_${Date.now()}.jpg`, { type: 'image/jpeg' });
+}
+
 async function captureMapRegionAsFile() {
     if (!map) throw new Error('Карта ещё не готова');
 
@@ -1651,6 +3216,14 @@ async function captureMapRegionAsFile() {
     );
     if (!bounds.isValid() || bounds.getSouth() >= bounds.getNorth() || bounds.getWest() >= bounds.getEast()) {
         bounds = map.getBounds();
+    }
+
+    if (currentBasemap === 'dzz' && dzzSession.connected) {
+        try {
+            return await captureDzzRegionAsFile(bounds);
+        } catch (err) {
+            console.warn('dzz capture fallback', err);
+        }
     }
 
     const zoom = chooseCaptureZoom(bounds);
@@ -1671,7 +3244,7 @@ async function captureMapRegionAsFile() {
     const tileMaxX = Math.floor((maxX - 1e-6) / MAP_CAPTURE_TILE);
     const tileMinY = Math.floor(minY / MAP_CAPTURE_TILE);
     const tileMaxY = Math.floor((maxY - 1e-6) / MAP_CAPTURE_TILE);
-    const worldTiles = 2 ** zoom;
+    const { nx, ny } = tileGridSize(zoom);
 
     const mosaicW = (tileMaxX - tileMinX + 1) * MAP_CAPTURE_TILE;
     const mosaicH = (tileMaxY - tileMinY + 1) * MAP_CAPTURE_TILE;
@@ -1682,18 +3255,24 @@ async function captureMapRegionAsFile() {
     mctx.fillStyle = '#1a1a1a';
     mctx.fillRect(0, 0, mosaicW, mosaicH);
 
+    const allowEsriFallback = currentMapCrs() !== 'EPSG:4326';
     const jobs = [];
     for (let ty = tileMinY; ty <= tileMaxY; ty++) {
         for (let tx = tileMinX; tx <= tileMaxX; tx++) {
-            const wrappedX = ((tx % worldTiles) + worldTiles) % worldTiles;
-            if (ty < 0 || ty >= worldTiles) continue;
+            const wrappedX = ((tx % nx) + nx) % nx;
+            if (ty < 0 || ty >= ny) continue;
             const url = getActiveBasemapTileUrl(zoom, wrappedX, ty);
             const dx = (tx - tileMinX) * MAP_CAPTURE_TILE;
             const dy = (ty - tileMinY) * MAP_CAPTURE_TILE;
             jobs.push(
-                loadCorsImage(url)
+                loadCaptureTileImage(url)
                     .then(img => { mctx.drawImage(img, dx, dy); })
-                    .catch(() => { /* битый тайл */ }),
+                    .catch(() => {
+                        if (!allowEsriFallback) return;
+                        return loadCorsImage(getActiveBasemapTileUrl(zoom, wrappedX, ty, true))
+                            .then(img => { mctx.drawImage(img, dx, dy); })
+                            .catch(() => { /* битый тайл */ });
+                    }),
             );
         }
     }
@@ -1721,6 +3300,7 @@ async function captureMapRegionAsFile() {
     lastMapCapture = {
         mode: 'tiles',
         zoom,
+        crs: currentMapCrs(),
         width: outW,
         height: outH,
         geoBounds: { ...geoBounds },
@@ -1936,23 +3516,119 @@ const DEFAULT_LAYERS = [
     { id: 'weeds', name: 'Скопление сорняков', color: '#22c55e', coords: [] },
 ];
 
-function initMap() {
-    map = L.map('map', { zoomControl: false }).setView([53.9, 27.56], 13);
-    window.map = map;
+function createBasemapTileLayers() {
+    const basemapCommon = {
+        maxZoom: 22,
+        minZoom: 3,
+        keepBuffer: 2,
+        updateWhenZooming: false,
+        updateWhenIdle: true,
+        crossOrigin: true,
+    };
+    tileSatellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        ...basemapCommon,
+        maxNativeZoom: 19,
+        attribution: 'Tiles © Esri',
+        zIndex: 1,
+    });
+    tileScheme = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        ...basemapCommon,
+        maxNativeZoom: 19,
+        subdomains: 'abc',
+        attribution: '© OpenStreetMap',
+        zIndex: 1,
+    });
+}
 
-    L.control.zoom({ position: 'bottomleft' }).addTo(map);
-
-    tileSatellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { attribution: 'Tiles &copy; Esri', maxZoom: 22 });
-    tileScheme = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap', maxZoom: 19 });
-    tileSatellite.addTo(map);
-    currentBasemap = 'satellite';
-
+function bindMapChromeEvents() {
     const coordsDisplay = document.getElementById('coords-display');
     map.on('mousemove', (e) => {
-        coordsDisplay.innerText = `${e.latlng.lat.toFixed(5)}°N ${e.latlng.lng.toFixed(5)}°E`;
+        if (coordsDisplay) coordsDisplay.innerText = `${e.latlng.lat.toFixed(5)}°N ${e.latlng.lng.toFixed(5)}°E`;
+        updateTileDisplay(e.latlng);
     });
-    map.on('zoomend moveend', updateScaleDisplay);
+    map.on('zoomend moveend', () => {
+        updateScaleDisplay();
+        updateDzzTileHud();
+        scheduleDzzPrefetch();
+    });
+    map.on('click', onMapClick);
     updateScaleDisplay();
+    updateCrsDisplay();
+    updateDzzTileHud();
+}
+
+function createLeafletMap(crsCode, view) {
+    const nextCrs = crsCode === 'EPSG:4326' ? 'EPSG:4326' : 'EPSG:3857';
+    mapCrsCode = nextCrs;
+    const center = view?.center || [53.9, 27.56];
+    const zoom = view?.zoom != null ? view.zoom : 13;
+    map = L.map('map', {
+        crs: leafletCrsFor(nextCrs),
+        zoomControl: false,
+        minZoom: 3,
+        maxZoom: 22,
+        worldCopyJump: true,
+    }).setView(center, zoom, { animate: false });
+    window.map = map;
+
+    map.createPane('dzzGridPane');
+    const gridPane = map.getPane('dzzGridPane');
+    if (gridPane) {
+        gridPane.style.zIndex = 350;
+        gridPane.style.pointerEvents = 'none';
+    }
+
+    const tilePane = map.getPane('tilePane');
+    if (tilePane) tilePane.style.pointerEvents = 'none';
+
+    L.control.zoom({ position: 'bottomleft' }).addTo(map);
+    createBasemapTileLayers();
+    bindMapChromeEvents();
+}
+
+function recreateMap(crsCode) {
+    const view = map ? { center: map.getCenter(), zoom: map.getZoom() } : null;
+    if (typeof deactivateCurrentTool === 'function') deactivateCurrentTool();
+    if (dzzTileGridLayer && map?.hasLayer(dzzTileGridLayer)) {
+        map.removeLayer(dzzTileGridLayer);
+    }
+    dzzTileGridLayer = null;
+
+    if (map) {
+        layersRegistry.forEach((entry) => {
+            if (entry?.group && map.hasLayer(entry.group)) map.removeLayer(entry.group);
+        });
+        [textLayerGroup, overlaysLayerGroup, fieldLabelsLayerGroup, aoiLayer].forEach((group) => {
+            if (group && map.hasLayer(group)) map.removeLayer(group);
+        });
+        map.remove();
+    }
+
+    tileSatellite = tileScheme = tileDzz = tileCustom = null;
+    tileCustomSig = '';
+    createLeafletMap(crsCode, view);
+
+    layersRegistry.forEach((entry) => {
+        if (entry?.group && entry.visible !== false) entry.group.addTo(map);
+    });
+    if (textLayerGroup) textLayerGroup.addTo(map);
+    if (overlaysLayerGroup) overlaysLayerGroup.addTo(map);
+    if (fieldLabelsLayerGroup) fieldLabelsLayerGroup.addTo(map);
+    if (aoiLayer) aoiLayer.addTo(map);
+    applyDzzTileGridLayer();
+    setTimeout(() => { if (map) map.invalidateSize(); }, 50);
+}
+
+function ensureMapCrs(crsCode) {
+    const next = crsCode === 'EPSG:4326' ? 'EPSG:4326' : 'EPSG:3857';
+    if (!map || currentMapCrs() !== next) recreateMap(next);
+}
+
+function initMap() {
+    createLeafletMap('EPSG:3857');
+    tileSatellite.addTo(map);
+    currentBasemap = 'satellite';
+    bindDzzTileFormSync();
 
     DEFAULT_LAYERS.forEach(l => addLayer(l.id, l.name, l.color, l.coords));
     activeLayerId = 'points';
@@ -1969,8 +3645,6 @@ function initMap() {
     initNetworkStatus();
     populateDrawLayerSelect();
     populateCreateCropSelect();
-
-    map.on('click', onMapClick);
 
     document.addEventListener('click', (e) => {
         // во время freehand панель кисти внутри more-menu — не закрывать
@@ -3336,86 +5010,195 @@ function runSegmentation(architecture, opts = {}) {
 }
 
 /* --- Настройки распознавания и подложки --- */
-function removeBasemapLayers() {
+function setBasemapLayerVisible(layer, visible) {
+    if (!map || !layer) return;
+    const has = map.hasLayer(layer);
+    if (visible && !has) layer.addTo(map);
+    else if (!visible && has) map.removeLayer(layer);
+}
+
+function bringGroupToFront(group) {
+    if (!map || !group) return;
+    if (typeof group.bringToFront === 'function') {
+        if (typeof map.hasLayer !== 'function' || map.hasLayer(group)) group.bringToFront();
+        return;
+    }
+    if (typeof group.eachLayer === 'function') {
+        group.eachLayer((layer) => {
+            if (typeof layer.bringToFront === 'function') layer.bringToFront();
+        });
+    }
+}
+
+function raiseWorkingOverlays() {
     if (!map) return;
-    [tileSatellite, tileScheme, tileDzz, tileCustom].forEach((layer) => {
-        if (layer && map.hasLayer(layer)) map.removeLayer(layer);
+    layersRegistry.forEach((entry) => {
+        if (entry?.group && map.hasLayer(entry.group)) bringGroupToFront(entry.group);
     });
+    bringGroupToFront(overlaysLayerGroup);
+    bringGroupToFront(textLayerGroup);
+    bringGroupToFront(fieldLabelsLayerGroup);
+    if (aoiLayer && map.hasLayer(aoiLayer)) bringGroupToFront(aoiLayer);
+}
+
+function dzzViewHasCoverage() {
+    if (!map || !dzzSites.length) return false;
+    const view = map.getBounds();
+    return dzzSites.some((site) => view.intersects(site.bounds));
+}
+
+function restoreMapView(view) {
+    if (!map || !view) return;
+    map.setView(view.center, view.zoom, { animate: false });
+}
+
+function removeBasemapLayers() {
+    setBasemapLayerVisible(tileSatellite, false);
+    setBasemapLayerVisible(tileScheme, false);
+    setBasemapLayerVisible(tileDzz, false);
+    setBasemapLayerVisible(tileCustom, false);
 }
 
 function buildAuthLayer(urlTemplate, login, password, attribution) {
-    const url = (urlTemplate || '').trim();
-    if (!url || !url.includes('{z}')) return null;
+    const resolved = resolveXyzTileTemplate(urlTemplate);
+    const url = (resolved?.url || '').trim();
+    if (!url || (!url.includes('{z}') && !url.includes('{TileMatrix}'))) return null;
     return new AuthTileLayer(url, {
         attribution: attribution || '',
         maxZoom: 22,
-        maxNativeZoom: 22,
+        minZoom: 3,
+        maxNativeZoom: resolved.maxNativeZoom,
+        minNativeZoom: resolved.minNativeZoom,
+        zoomOffset: resolved.zoomOffset,
+        keepBuffer: 2,
+        updateWhenZooming: false,
+        updateWhenIdle: true,
+        crossOrigin: true,
         authUser: login || '',
         authPass: password || '',
         errorTileUrl: '',
+        zIndex: 1,
     });
+}
+
+function buildDzzLayer(urlTemplate) {
+    const resolved = resolveDzzTileTemplate(urlTemplate);
+    const url = (resolved.url || '').trim();
+    if (!url || (!url.includes('{z}') && !url.includes('{TileMatrix}'))) return null;
+    const layer = new DzzOrthoLayer(url, {
+        attribution: 'dzz.by · БелПСХАГИ',
+        maxZoom: 22,
+        minZoom: 3,
+        maxNativeZoom: resolved.maxNativeZoom,
+        minNativeZoom: resolved.minNativeZoom,
+        zoomOffset: resolved.zoomOffset,
+        dzzSig: `proxy|${url}`,
+        keepBuffer: 4,
+        updateWhenIdle: true,
+        updateWhenZooming: false,
+        className: 'dzz-ortho-layer',
+        errorTileUrl: '',
+        zIndex: 2,
+    });
+    return layer;
 }
 
 function setBasemap(value, silent = false) {
     if (!map) return;
     readBasemapExtraFromForm();
 
+    if (value === 'dzz' && !dzzSession.connected) {
+        if (!silent) showToast('Укажите логин, пароль и адрес, затем «Проверить подключение»');
+        const select = document.getElementById('opt-basemap');
+        if (select) select.value = currentBasemap;
+        updateBasemapExtraVisibility(currentBasemap);
+        return;
+    }
+    if (value === 'custom' && !basemapExtra.customUrl) {
+        if (!silent) showToast('Укажите URL дополнительной подложки');
+        const select = document.getElementById('opt-basemap');
+        if (select) select.value = currentBasemap;
+        updateBasemapExtraVisibility(currentBasemap);
+        return;
+    }
+
+    const view = { center: map.getCenter(), zoom: map.getZoom() };
+    const wantedCrs = wantedCrsForBasemap(value);
+    if (currentMapCrs() !== wantedCrs) {
+        ensureMapCrs(wantedCrs);
+    }
+
     if (value === 'dzz') {
-        if (!basemapExtra.dzzLogin || !basemapExtra.dzzPassword) {
-            if (!silent) showToast('Для dzz.by нужны логин и пароль');
-            const select = document.getElementById('opt-basemap');
-            if (select) select.value = currentBasemap;
-            updateBasemapExtraVisibility(currentBasemap);
-            return;
+        const nextUrl = basemapExtra.dzzUrl || DZZ_DEFAULT_TILE_URL;
+        const sig = `proxy|${resolveDzzTileTemplate(nextUrl).url}`;
+        const canReuse = tileDzz && tileDzz._dzzSig === sig;
+        if (!canReuse) {
+            const layer = buildDzzLayer(nextUrl);
+            if (!layer) {
+                if (!silent) showToast('Проверьте URL шаблон тайлов dzz.by');
+                return;
+            }
+            setBasemapLayerVisible(tileDzz, false);
+            tileDzz = layer;
         }
-        const layer = buildAuthLayer(
-            basemapExtra.dzzUrl || DZZ_DEFAULT_TILE_URL,
-            basemapExtra.dzzLogin,
-            basemapExtra.dzzPassword,
-            'dzz.by · БелПСХАГИ'
-        );
-        if (!layer) {
-            if (!silent) showToast('Проверьте URL шаблон тайлов dzz.by');
-            return;
-        }
-        removeBasemapLayers();
-        tileDzz = layer;
-        tileDzz.addTo(map);
+        setBasemapLayerVisible(tileScheme, false);
+        setBasemapLayerVisible(tileCustom, false);
+        setBasemapLayerVisible(tileSatellite, true);
+        setBasemapLayerVisible(tileDzz, true);
+        tileSatellite.setZIndex(1);
+        tileDzz.setZIndex(2);
+        loadDzzSites(nextUrl, { silent: true, focus: false }).then((ok) => {
+            if (ok && dzzSites.length && !dzzViewHasCoverage()) {
+                setDzzConnStatus(`Подключено: ${dzzSites.length} участок(ов). Выберите участок внизу, если ортофото не видно`);
+            }
+            raiseWorkingOverlays();
+        });
     } else if (value === 'custom') {
-        if (!basemapExtra.customUrl) {
-            if (!silent) showToast('Укажите URL дополнительной подложки');
-            const select = document.getElementById('opt-basemap');
-            if (select) select.value = currentBasemap;
-            updateBasemapExtraVisibility(currentBasemap);
-            return;
+        const sig = `${basemapExtra.customUrl}|${basemapExtra.customLogin}|${basemapExtra.customName}|${basemapExtra.customCrs}|${basemapExtra.customZoomOffset}`;
+        if (!tileCustom || tileCustomSig !== sig) {
+            const layer = buildAuthLayer(
+                basemapExtra.customUrl,
+                basemapExtra.customLogin,
+                basemapExtra.customPassword,
+                basemapExtra.customName || 'Дополнительная подложка'
+            );
+            if (!layer) {
+                if (!silent) showToast('URL должен содержать {z}/{x}/{y} или ArcGIS {z}/{y}/{x}');
+                return;
+            }
+            setBasemapLayerVisible(tileCustom, false);
+            tileCustom = layer;
+            tileCustomSig = sig;
         }
-        const layer = buildAuthLayer(
-            basemapExtra.customUrl,
-            basemapExtra.customLogin,
-            basemapExtra.customPassword,
-            basemapExtra.customName || 'Дополнительная подложка'
-        );
-        if (!layer) {
-            if (!silent) showToast('URL должен содержать {z}/{x}/{y}');
-            return;
-        }
-        removeBasemapLayers();
-        tileCustom = layer;
-        tileCustom.addTo(map);
+        setBasemapLayerVisible(tileSatellite, false);
+        setBasemapLayerVisible(tileScheme, false);
+        setBasemapLayerVisible(tileDzz, false);
+        setBasemapLayerVisible(tileCustom, true);
     } else if (value === 'scheme') {
-        removeBasemapLayers();
-        tileScheme.addTo(map);
+        setBasemapLayerVisible(tileSatellite, false);
+        setBasemapLayerVisible(tileDzz, false);
+        setBasemapLayerVisible(tileCustom, false);
+        setBasemapLayerVisible(tileScheme, true);
     } else {
         value = 'satellite';
-        removeBasemapLayers();
-        tileSatellite.addTo(map);
+        setBasemapLayerVisible(tileScheme, false);
+        setBasemapLayerVisible(tileDzz, false);
+        setBasemapLayerVisible(tileCustom, false);
+        setBasemapLayerVisible(tileSatellite, true);
     }
+
+    restoreMapView(view);
+    raiseWorkingOverlays();
+    updateCrsDisplay();
 
     currentBasemap = value;
     displaySettings.basemap = value;
     const select = document.getElementById('opt-basemap');
     if (select) select.value = value;
     updateBasemapExtraVisibility(value);
+    renderDzzSites();
+    if (value === 'dzz') scheduleDzzPrefetch();
+    else dzzClearPrefetchQueue();
 
     if (!silent) {
         const labels = {
@@ -3437,7 +5220,7 @@ function saveSettings() {
     displaySettings.basemap = document.getElementById('opt-basemap')?.value || 'satellite';
     readBasemapExtraFromForm();
     localStorage.setItem(displaySettingsKey(), JSON.stringify(displaySettings));
-    localStorage.setItem(basemapExtraKey(), JSON.stringify(basemapExtra));
+    persistBasemapExtra();
     applyDisplaySettings();
     setBasemap(displaySettings.basemap);
     logAction('account', 'Обновлены настройки');
@@ -3497,6 +5280,7 @@ function setTool(tool) {
         mapArea.classList.add('tool-' + tool);
     }
     if (map) map.dragging.enable();
+    raiseWorkingOverlays();
     if (tool !== 'freehand') {
         document.getElementById('edit-area-controls').style.display = 'none';
     }
@@ -3506,6 +5290,11 @@ function setTool(tool) {
 }
 
 function onMapClick(e) {
+    if (currentBasemap === 'dzz' && e.originalEvent && (e.originalEvent.ctrlKey || e.originalEvent.metaKey)) {
+        const t = getMapTileCoords(e.latlng, map.getZoom());
+        goToDzzTile(t.z, t.x, t.y);
+        return;
+    }
     if (activeTool === 'freehand') return;
     if (activeTool === 'select') {
         if (suppressMapClick) return;
@@ -3798,12 +5587,8 @@ function updateCreateCropBlockVisibility() {
 }
 
 function openEditAreaMode() {
-    if (!analysisComplete) {
-        alert('Сначала загрузите снимок и дождитесь завершения анализа.');
-        return;
-    }
     if (selectedFeatures.length !== 1) {
-        alert('Выделите одну область для редактирования (или создайте новую через «Создать область»).');
+        showToast('Выделите одну область для редактирования (или создайте новую через «Создать область»).');
         return;
     }
     createSessionActive = false;
@@ -3848,10 +5633,6 @@ function finishEditAreaMode() {
 }
 
 function startCreateArea() {
-    if (!analysisComplete) {
-        alert('Сначала загрузите снимок и дождитесь завершения анализа. После анализа можно рисовать области.');
-        return;
-    }
     clearSelection();
     hideFieldDetail();
     createSessionActive = true;
@@ -4600,42 +6381,120 @@ function toggleLayerGroup(id) {
 }
 
 function initNetworkStatus() {
-    const el = document.getElementById('status-online');
-    if (!el) return;
-    const updateBrowser = () => {
-        if (!navigator.onLine) {
-            el.textContent = '• Оффлайн';
-            el.className = 'status-offline';
-            return;
-        }
+    const refresh = () => {
+        updateDzzNetworkStatus();
         updateMlNetworkStatus();
     };
-    updateBrowser();
-    window.addEventListener('online', updateBrowser);
-    window.addEventListener('offline', updateBrowser);
+    refresh();
+    window.addEventListener('online', refresh);
+    window.addEventListener('offline', refresh);
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') refresh();
+    });
     setInterval(() => {
         if (navigator.onLine) updateMlNetworkStatus();
     }, 30000);
 }
 
+function setDzzHeaderStatus(available, title) {
+    const el = document.getElementById('status-dzz');
+    if (!el) return;
+    el.textContent = available ? 'dzz.by · Онлайн' : 'dzz.by · Сервис недоступен';
+    el.className = available ? 'status-online' : 'status-offline';
+    el.title = title || '';
+}
+
+function scheduleDzzHealth() {
+    if (dzzHealthTimer) clearTimeout(dzzHealthTimer);
+    const ms = (!navigator.onLine || dzzHealthAvailable) ? 30000 : 5000;
+    dzzHealthTimer = setTimeout(() => {
+        if (navigator.onLine) updateDzzNetworkStatus();
+        else scheduleDzzHealth();
+    }, ms);
+}
+
+async function updateDzzNetworkStatus() {
+    const el = document.getElementById('status-dzz');
+    if (!el) {
+        scheduleDzzHealth();
+        return;
+    }
+    if (!navigator.onLine) {
+        dzzHealthAvailable = false;
+        setDzzHeaderStatus(false, 'Нет сетевого соединения');
+        scheduleDzzHealth();
+        return;
+    }
+    if (dzzStatusInflight) return;
+    dzzStatusInflight = true;
+    try {
+        const res = await fetch('/api/dzz/health', { credentials: 'include' });
+        const data = await res.json().catch(() => ({}));
+        const available = Boolean(data.available);
+        const connected = Boolean(data.connected);
+        const recovered = !dzzHealthAvailable && available;
+        dzzHealthAvailable = available;
+        setDzzHeaderStatus(available, data.message || '');
+        const settings = document.getElementById('dzz-conn-status');
+        const probing = settings && settings.textContent === 'Проверка подключения…';
+
+        if (connected && !dzzSession.connected) {
+            await restoreDzzSession({ skipHealth: true });
+            if (dzzSession.connected && map && (displaySettings.basemap === 'dzz' || currentBasemap === 'dzz')) {
+                setBasemap('dzz', true);
+                if (!probing) setDzzConnStatus('Сессия dzz.by восстановлена после перезапуска сервера');
+                showToast('Сессия dzz.by восстановлена');
+            }
+        } else if (dzzSession.connected && available && !connected) {
+            await restoreDzzSession({ skipHealth: true });
+            if (!dzzSession.connected && !probing) {
+                setDzzConnStatus('Сессия dzz.by сброшена. Нажмите «Проверить подключение».');
+            }
+        } else if (!probing && dzzSession.connected && !available) {
+            setDzzConnStatus('Сервис dzz.by недоступен. Повторная проверка каждые 5 с.');
+        }
+
+        if (recovered && dzzSession.connected && tileDzz && map?.hasLayer(tileDzz)) {
+            tileDzz.redraw();
+            scheduleDzzPrefetch();
+            if (!probing) {
+                setDzzConnStatus('Связь с dzz.by восстановлена');
+                showToast('Связь с dzz.by восстановлена');
+            }
+        }
+    } catch {
+        dzzHealthAvailable = false;
+        setDzzHeaderStatus(false, 'Не удалось проверить dzz.by');
+    } finally {
+        dzzStatusInflight = false;
+        scheduleDzzHealth();
+    }
+}
+
 async function updateMlNetworkStatus() {
-    const el = document.getElementById('status-online');
-    if (!el || !navigator.onLine) return;
+    const el = document.getElementById('status-ml');
+    if (!el) return;
+    if (!navigator.onLine) {
+        el.textContent = 'ML оффлайн';
+        el.className = 'status-ml status-offline';
+        el.title = 'Нет сетевого соединения';
+        return;
+    }
     try {
         const health = await fetchMlHealth();
         if (health.model_loaded) {
             const models = (health.available_models || []).join(', ') || 'ok';
-            el.textContent = `• ML онлайн (${models})`;
-            el.className = 'status-online';
+            el.textContent = `ML · ${models}`;
+            el.className = 'status-ml status-online';
             el.title = '';
         } else {
-            el.textContent = '• ML (нет весов)';
-            el.className = 'status-offline';
+            el.textContent = 'ML · нет весов';
+            el.className = 'status-ml status-offline';
             el.title = health.hint || 'Положите веса на ML-сервер';
         }
     } catch {
-        el.textContent = '• Онлайн (ML недоступен)';
-        el.className = 'status-online';
+        el.textContent = 'ML недоступен';
+        el.className = 'status-ml';
         el.title = 'Запустите ML backend на :8000 или docker compose';
     }
 }
@@ -4670,16 +6529,13 @@ function initSidebarResize() {
 function updateScaleDisplay() {
     const el = document.getElementById('scale-display');
     if (!el || !map) return;
-
-    // Approx scale denominator at 96dpi:
-    // scale = metersPerPixel * dpi * inchesPerMeter
-    const center = map.getCenter();
-    const zoom = map.getZoom();
-    const mpp = 40075016.686 / (256 * Math.pow(2, zoom)) * Math.cos(center.lat * Math.PI / 180);
+    const midY = map.getSize().y / 2;
+    const ll1 = map.containerPointToLatLng(L.point(0, midY));
+    const ll2 = map.containerPointToLatLng(L.point(256, midY));
+    const mpp = map.distance(ll1, ll2) / 256;
     const dpi = 96;
     const inchesPerMeter = 39.37;
     const denom = Math.max(1, Math.round(mpp * dpi * inchesPerMeter));
-
     const pretty = denom >= 10000 ? denom.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ') : denom.toString();
     el.innerText = `1:${pretty}`;
 }

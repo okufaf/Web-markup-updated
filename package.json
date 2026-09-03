@@ -5,8 +5,8 @@
   "type": "module",
   "description": "Agriculture Vision web UI + auth + ML proxy.",
   "scripts": {
-    "dev": "node server.js",
-    "start": "node server.js"
+    "dev": "node --use-system-ca server.js",
+    "start": "node --use-system-ca server.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",
