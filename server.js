@@ -7,6 +7,7 @@ import bcrypt from 'bcryptjs';
 import cookieParser from 'cookie-parser';
 import jwt from 'jsonwebtoken';
 import { createProxyMiddleware } from 'http-proxy-middleware';
+import nodemailer from 'nodemailer';
 import pg from 'pg';
 import {
   resolveWmtsCapabilitiesUrl,
@@ -23,11 +24,67 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 5173;
 // Локально: localhost:8000. В Docker задайте ML_BACKEND_URL=http://backend:8000
 const ML_BACKEND_URL = process.env.ML_BACKEND_URL || 'http://localhost:8000';
 const DATABASE_URL = process.env.DATABASE_URL || '';
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-only-secret-change-me';
+const DEV_DEFAULT_JWT_SECRET = 'dev-only-secret-change-me';
+const JWT_SECRET = process.env.JWT_SECRET || DEV_DEFAULT_JWT_SECRET;
+if (process.env.NODE_ENV === 'production' && (!process.env.JWT_SECRET || process.env.JWT_SECRET === DEV_DEFAULT_JWT_SECRET)) {
+  console.error(
+    '[FATAL] JWT_SECRET не задан или используется значение по умолчанию для разработки. ' +
+    'В production обязательно установите свой JWT_SECRET (см. .env.example) — иначе токены авторизации ' +
+    'и шифрование сохранённых сессий dzz.by (data/dzz-sessions.enc) не защищены.'
+  );
+  process.exit(1);
+}
 
 const DATA_DIR = path.join(__dirname, 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const DZZ_SESSIONS_FILE = path.join(DATA_DIR, 'dzz-sessions.enc');
+
+const SMTP_HOST = process.env.SMTP_HOST || '';
+const SMTP_PORT = process.env.SMTP_PORT ? Number(process.env.SMTP_PORT) : 587;
+const SMTP_SECURE = process.env.SMTP_SECURE === 'true';
+const SMTP_USER = process.env.SMTP_USER || '';
+const SMTP_PASS = process.env.SMTP_PASS || '';
+const MAIL_FROM = process.env.MAIL_FROM || 'Agriculture Vision <no-reply@ttz.local>';
+
+let mailTransport = null;
+function getMailTransport() {
+  if (!SMTP_HOST) return null;
+  if (!mailTransport) {
+    mailTransport = nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: SMTP_PORT,
+      secure: SMTP_SECURE,
+      auth: SMTP_USER ? { user: SMTP_USER, pass: SMTP_PASS } : undefined,
+    });
+  }
+  return mailTransport;
+}
+
+async function sendPasswordResetEmail(email, code) {
+  const text =
+    `Код для восстановления пароля Agriculture Vision: ${code}\n` +
+    'Код действителен 15 минут. Если вы не запрашивали восстановление пароля — просто игнорируйте это письмо.';
+  const transport = getMailTransport();
+  if (!transport) {
+    console.log(`[password-reset] SMTP не настроен (см. .env.example). Код для ${email}: ${code}`);
+    return;
+  }
+  await transport.sendMail({
+    from: MAIL_FROM,
+    to: email,
+    subject: 'Код восстановления пароля — Agriculture Vision',
+    text,
+  });
+}
+
+const passwordResets = new Map(); // email -> { codeHash, expiresAt, attempts, lastSentAt }
+const RESET_CODE_TTL_MS = 15 * 60 * 1000;
+const RESET_RESEND_COOLDOWN_MS = 60 * 1000;
+const RESET_MAX_ATTEMPTS = 5;
+
+function generateResetCode() {
+  return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+}
 
 const pool = DATABASE_URL
   ? new pg.Pool({ connectionString: DATABASE_URL })
@@ -55,6 +112,19 @@ const mlProxy = (mountPath) =>
 
 app.use('/api/v1/segmentation', mlProxy('/api/v1/segmentation'));
 app.use('/api/v1/classification', mlProxy('/api/v1/classification'));
+
+async function probeMlAvailability() {
+  try {
+    const upstream = await fetch(`${ML_BACKEND_URL}/api/v1/segmentation/health`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!upstream.ok) return { available: false, models: null };
+    const data = await upstream.json().catch(() => ({}));
+    return { available: true, models: data?.models ?? data?.weights ?? null };
+  } catch {
+    return { available: false, models: null };
+  }
+}
 
 function rowToUser(row) {
   if (!row) return null;
@@ -224,10 +294,21 @@ app.get('/api/health', async (req, res) => {
   } catch {
     dzz = { available: false, connected: false };
   }
+  let ml = { available: false, models: null };
+  try {
+    ml = await probeMlAvailability();
+  } catch {
+    ml = { available: false, models: null };
+  }
   res.json({
     ok: true,
     db,
-    ml: ML_BACKEND_URL,
+    ml: {
+      url: ML_BACKEND_URL,
+      available: Boolean(ml.available),
+      status: ml.available ? 'online' : 'unavailable',
+      models: ml.models,
+    },
     dzz: {
       available: Boolean(dzz.available),
       connected: Boolean(dzz.connected),
@@ -283,6 +364,82 @@ app.post('/api/login', async (req, res) => {
 
     setAuthCookie(res, { email: user.email }, !!remember);
     res.json({ user: publicUser(user) });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'SERVER_ERROR' });
+  }
+});
+
+app.post('/api/forgot-password', async (req, res) => {
+  try {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    if (!email || !email.includes('@')) return res.status(400).json({ error: 'INVALID_EMAIL' });
+
+    const existing = passwordResets.get(email);
+    if (existing && Date.now() - existing.lastSentAt < RESET_RESEND_COOLDOWN_MS) {
+      return res.json({ ok: true });
+    }
+
+    const user = await findUserByEmail(email);
+    if (user) {
+      const code = generateResetCode();
+      const codeHash = await bcrypt.hash(code, 10);
+      passwordResets.set(email, {
+        codeHash,
+        expiresAt: Date.now() + RESET_CODE_TTL_MS,
+        attempts: 0,
+        lastSentAt: Date.now(),
+      });
+      try {
+        await sendPasswordResetEmail(email, code);
+      } catch (e) {
+        console.error('[password-reset] send failed', e);
+      }
+    }
+    // Ответ одинаковый независимо от того, существует ли email — чтобы не раскрывать список аккаунтов.
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'SERVER_ERROR' });
+  }
+});
+
+app.post('/api/reset-password', async (req, res) => {
+  try {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    const code = String(req.body?.code || '').trim();
+    const newPassword = req.body?.newPassword;
+
+    if (!email || !code) return res.status(400).json({ error: 'INVALID_REQUEST' });
+    if (!isStrongPassword(newPassword)) return res.status(400).json({ error: 'WEAK_PASSWORD' });
+
+    const entry = passwordResets.get(email);
+    if (!entry || entry.expiresAt < Date.now()) {
+      passwordResets.delete(email);
+      return res.status(400).json({ error: 'CODE_EXPIRED' });
+    }
+    if (entry.attempts >= RESET_MAX_ATTEMPTS) {
+      passwordResets.delete(email);
+      return res.status(429).json({ error: 'TOO_MANY_ATTEMPTS' });
+    }
+
+    const match = await bcrypt.compare(code, entry.codeHash);
+    if (!match) {
+      entry.attempts += 1;
+      return res.status(400).json({ error: 'INVALID_CODE' });
+    }
+
+    const user = await findUserByEmail(email);
+    if (!user) {
+      passwordResets.delete(email);
+      return res.status(400).json({ error: 'INVALID_CODE' });
+    }
+
+    user.passwordHash = await bcrypt.hash(String(newPassword), 12);
+    await updateUser(user);
+    passwordResets.delete(email);
+    res.clearCookie('av_session');
+    res.json({ ok: true });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'SERVER_ERROR' });

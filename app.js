@@ -1126,8 +1126,6 @@ function persistBasemapExtra() {
         dzzUrl: basemapExtra.dzzUrl || DZZ_DEFAULT_TILE_URL,
         customName: basemapExtra.customName || '',
         customUrl: basemapExtra.customUrl || '',
-        customLogin: basemapExtra.customLogin || '',
-        customPassword: basemapExtra.customPassword || '',
         customCrs: basemapExtra.customCrs === 'EPSG:4326' ? 'EPSG:4326' : 'EPSG:3857',
         customZoomOffset: Number.isFinite(basemapExtra.customZoomOffset) ? basemapExtra.customZoomOffset : 0,
         customMinNativeZoom: Number.isFinite(basemapExtra.customMinNativeZoom) ? basemapExtra.customMinNativeZoom : 0,
@@ -1153,6 +1151,8 @@ function loadBasemapExtraToForm() {
     }
     basemapExtra.dzzLogin = '';
     basemapExtra.dzzPassword = '';
+    basemapExtra.customLogin = '';
+    basemapExtra.customPassword = '';
     if (isLegacyDzzUrl(basemapExtra.dzzUrl)) basemapExtra.dzzUrl = DZZ_DEFAULT_TILE_URL;
     else basemapExtra.dzzUrl = resolveDzzTileTemplate(basemapExtra.dzzUrl).url;
     persistBasemapExtra();
@@ -1278,6 +1278,158 @@ function toggleMode(mode) {
     } else {
         registerForm.classList.remove('active'); registerText.classList.remove('active');
         loginForm.classList.add('active'); loginText.classList.add('active');
+    }
+}
+
+/* =========================================================
+   ВОССТАНОВЛЕНИЕ ПАРОЛЯ (код на email)
+   ========================================================= */
+let resetCooldownUntil = 0;
+
+function openForgotPasswordModal() {
+    (async () => {
+        const useApi = await ensureAuthBackend();
+        if (!useApi) {
+            alert('Восстановление пароля работает только при подключении к серверу. В демо-режиме без сервера эта функция недоступна.');
+            return;
+        }
+        const prefill = document.getElementById('login-email')?.value.trim() || '';
+        openAppModal({
+            title: 'Восстановление пароля',
+            bodyHtml: `
+                <p class="modal-text">Укажите email аккаунта — мы отправим на него код подтверждения.</p>
+                <label class="modal-label">EMAIL</label>
+                <input type="email" id="reset-email" class="search-input modal-input" value="${prefill.replace(/"/g, '&quot;')}" placeholder="you@company.by">
+                <div id="reset-request-error" class="form-error"></div>
+            `,
+            actions: [
+                { label: 'Отправить код', className: 'mini-btn mini-btn-red', onClick: () => requestResetCode() },
+                { label: 'Отмена', className: 'mini-btn', onClick: () => closeAppModal() },
+            ],
+            focusId: 'reset-email',
+        });
+    })();
+}
+
+async function requestResetCode() {
+    const emailEl = document.getElementById('reset-email');
+    const errEl = document.getElementById('reset-request-error');
+    const email = emailEl?.value.trim().toLowerCase() || '';
+    if (errEl) errEl.style.display = 'none';
+    if (!email || !email.includes('@')) {
+        if (errEl) { errEl.innerText = 'Введите корректный email.'; errEl.style.display = 'block'; }
+        return;
+    }
+    try {
+        await apiFetch('/api/forgot-password', {
+            method: 'POST',
+            body: JSON.stringify({ email }),
+        });
+        resetCooldownUntil = Date.now() + 60000;
+        openResetCodeModal(email);
+    } catch (e) {
+        console.error('forgot-password failed', e);
+        if (errEl) {
+            errEl.innerText = 'Не удалось отправить код. Проверьте соединение и попробуйте снова.';
+            errEl.style.display = 'block';
+        }
+    }
+}
+
+function openResetCodeModal(email) {
+    openAppModal({
+        title: 'Введите код из письма',
+        bodyHtml: `
+            <p class="modal-text">Код отправлен на <strong>${email}</strong> и действует 15 минут.</p>
+            <label class="modal-label">КОД ИЗ ПИСЬМА</label>
+            <input type="text" id="reset-code" class="search-input modal-input" inputmode="numeric" maxlength="6" placeholder="000000">
+            <label class="modal-label">НОВЫЙ ПАРОЛЬ</label>
+            <div class="password-field">
+                <input type="password" id="reset-new-password" class="search-input modal-input" placeholder="8+ симв., Aa и спецсимвол" autocomplete="new-password">
+                <button type="button" class="password-toggle" aria-label="Показать пароль" title="Показать пароль"></button>
+            </div>
+            <label class="modal-label">ПОВТОРИТЕ ПАРОЛЬ</label>
+            <div class="password-field">
+                <input type="password" id="reset-new-password2" class="search-input modal-input" placeholder="••••••••" autocomplete="new-password">
+                <button type="button" class="password-toggle" aria-label="Показать пароль" title="Показать пароль"></button>
+            </div>
+            <div id="reset-code-error" class="form-error"></div>
+            <button type="button" class="link-red" id="reset-resend-btn" style="background:none;border:none;padding:0;margin-top:4px;cursor:pointer;font-size:0.85rem;text-decoration:underline;" onclick="resendResetCode('${email}')">Отправить код ещё раз</button>
+        `,
+        actions: [
+            { label: 'Сохранить новый пароль', className: 'mini-btn mini-btn-red', onClick: () => confirmResetPassword(email) },
+            { label: 'Отмена', className: 'mini-btn', onClick: () => closeAppModal() },
+        ],
+        focusId: 'reset-code',
+    });
+    initPasswordToggles();
+    updateResendCooldownUI();
+}
+
+function updateResendCooldownUI() {
+    const btn = document.getElementById('reset-resend-btn');
+    if (!btn) return;
+    const remaining = Math.ceil((resetCooldownUntil - Date.now()) / 1000);
+    if (remaining > 0) {
+        btn.disabled = true;
+        btn.innerText = `Отправить код ещё раз (${remaining} с)`;
+        setTimeout(updateResendCooldownUI, 1000);
+    } else {
+        btn.disabled = false;
+        btn.innerText = 'Отправить код ещё раз';
+    }
+}
+
+async function resendResetCode(email) {
+    if (Date.now() < resetCooldownUntil) return;
+    try {
+        await apiFetch('/api/forgot-password', {
+            method: 'POST',
+            body: JSON.stringify({ email }),
+        });
+        resetCooldownUntil = Date.now() + 60000;
+        updateResendCooldownUI();
+        showToast('Код отправлен повторно');
+    } catch {
+        showToast('Не удалось отправить код повторно');
+    }
+}
+
+const RESET_ERROR_MESSAGES = {
+    INVALID_CODE: 'Неверный код.',
+    CODE_EXPIRED: 'Код устарел или не запрашивался. Отправьте код ещё раз.',
+    TOO_MANY_ATTEMPTS: 'Слишком много неверных попыток. Запросите новый код.',
+    WEAK_PASSWORD: 'Пароль: минимум 8 символов, заглавные и строчные буквы, спецсимвол.',
+    INVALID_REQUEST: 'Заполните код и новый пароль.',
+};
+
+async function confirmResetPassword(email) {
+    const errEl = document.getElementById('reset-code-error');
+    if (errEl) errEl.style.display = 'none';
+    const code = document.getElementById('reset-code')?.value.trim() || '';
+    const newPassword = document.getElementById('reset-new-password')?.value || '';
+    const newPassword2 = document.getElementById('reset-new-password2')?.value || '';
+
+    const showErr = (msg) => { if (errEl) { errEl.innerText = msg; errEl.style.display = 'block'; } };
+
+    if (!code) { showErr('Введите код из письма.'); return; }
+    if (newPassword !== newPassword2) { showErr('Пароли не совпадают.'); return; }
+    const pwdErr = validatePassword(newPassword);
+    if (pwdErr) { showErr(pwdErr); return; }
+
+    try {
+        await apiFetch('/api/reset-password', {
+            method: 'POST',
+            body: JSON.stringify({ email, code, newPassword }),
+        });
+        closeAppModal();
+        clearLocalSession();
+        document.getElementById('login-email').value = email;
+        document.getElementById('login-password').value = '';
+        toggleMode('login');
+        showToast('Пароль обновлён — войдите с новым паролем');
+    } catch (e) {
+        showErr(RESET_ERROR_MESSAGES[e.code] || 'Не удалось сохранить новый пароль. Попробуйте снова.');
     }
 }
 
@@ -2882,7 +3034,6 @@ const POINT_RADIUS_M = 5; // только для авто-детекции (си
 
 const DETECTION_CONFIG = [
     { id: 'crops', opt: 'opt-crops', kind: 'polygon' },
-    { id: 'points', opt: 'opt-points', kind: 'point' },
     { id: 'double_sow', opt: 'opt-double-sow', kind: 'polygon' },
     { id: 'withering', opt: 'opt-withering', kind: 'polygon' },
     { id: 'edge_strip', opt: 'opt-edge-strip', kind: 'polygon' },

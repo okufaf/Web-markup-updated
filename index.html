@@ -83,7 +83,7 @@
                         <span class="checkmark"></span>
                         Запомнить меня
                     </label>
-                    <a href="#" class="forgot-password" onclick="return false;">Забыли пароль?</a>
+                    <a href="#" class="forgot-password" onclick="openForgotPasswordModal(); return false;">Забыли пароль?</a>
                 </div>
 
                 <div id="login-error" class="form-error">Неверный email или пароль.</div>
@@ -359,11 +359,6 @@
 
                 <div class="settings-section-title">Детекция точечных объектов</div>
                 <label class="settings-toggle">
-                    <input type="checkbox" id="opt-points" checked>
-                    <span class="checkmark"></span>
-                    <span>Деревья и опоры (точки)</span>
-                </label>
-                <label class="settings-toggle">
                     <input type="checkbox" id="opt-seeder-skip">
                     <span class="checkmark"></span>
                     <span>Пропуск сеялки</span>
@@ -400,7 +395,6 @@
 
                 <div id="basemap-dzz-block" class="basemap-extra-block">
                     <div class="settings-section-title">Доступ к dzz.by</div>
-                    <p class="panel-hint">Закрытый ресурс. Укажите логин, пароль и адрес подключения. Учётные данные не сохраняются в браузере: сервер проверяет соединение и сам подставляет их при запросах к dzz.by.</p>
                     <div class="settings-block-title">Логин dzz.by</div>
                     <input type="text" id="opt-dzz-login" class="search-input" autocomplete="off" placeholder="логин">
                     <div class="settings-block-title">Пароль dzz.by</div>
@@ -410,12 +404,10 @@
                     </div>
                     <div class="settings-block-title">Адрес подключения</div>
                     <input type="text" id="opt-dzz-url" class="search-input" placeholder="https://www.dzz.by/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer" value="https://www.dzz.by/arcgis/rest/services/georesursDDZ/Polya_all/ImageServer/tile/{z}/{y}/{x}">
-                    <p class="panel-hint">Шаблон тайлов: ArcGIS {z}/{y}/{x} (не OSM {z}/{x}/{y}). Рабочий зум 8–22; на 10–14 готовые тайлы, ближе — живой снимок. Соседи и следующий зум подгружаются заранее; при приближении сначала увеличенный тайл с предыдущего уровня, затем полный снимок. Если тайла нет, остаётся спутник. Можно перейти к z/x/y или включить сетку.</p>
                     <button type="button" class="mini-btn" id="dzz-test-btn" onclick="testDzzAccess()">Проверить подключение</button>
                     <p id="dzz-conn-status" class="panel-hint" style="margin-top:0;"></p>
                     <button type="button" class="mini-btn" id="dzz-logout-btn" onclick="disconnectDzz()">Выйти из dzz.by</button>
                     <div class="settings-block-title">WMTS</div>
-                    <p class="panel-hint">Разбор WMTSCapabilities.xml: слой, стиль и матрица тайлов. Клиент собирает REST {z}/{y}/{x}. У dzz.by матрицы GoogleMapsCompatible нет (ответ 520) — выберите default028mm.</p>
                     <button type="button" class="mini-btn" onclick="loadWmtsCatalog('dzz')">Загрузить WMTSCapabilities</button>
                     <p id="dzz-wmts-status" class="panel-hint" style="margin-top:0;"></p>
                     <div id="dzz-wmts-panel" hidden>
@@ -429,7 +421,6 @@
                         <button type="button" class="mini-btn" onclick="applyWmtsSelection('dzz')">Применить слой WMTS</button>
                     </div>
                     <div class="settings-block-title">Тайл z / x / y</div>
-                    <p class="panel-hint">Переход к клетке Web Mercator. Стрелки сдвигают на соседний тайл, Ctrl+клик по карте — к тайлу под курсором.</p>
                     <div class="dzz-tile-jump-row">
                         <label>z <input id="opt-dzz-tile-z" class="dzz-tile-input" type="number" min="0" max="22" inputmode="numeric"></label>
                         <label>x <input id="opt-dzz-tile-x" class="dzz-tile-input dzz-tile-input-wide" type="number" min="0" inputmode="numeric"></label>
