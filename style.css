@@ -232,11 +232,12 @@ body {
 
 .company-name { font-size: var(--fs-sm); color: #64748b; }
 .status-pills { display: inline-flex; align-items: center; gap: 6px; flex-wrap: nowrap; }
-.status-online, .status-offline, .status-ml {
+.status-online, .status-offline, .status-idle, .status-ml {
     font-size: var(--fs-sm); padding: 4px 8px; border-radius: 12px; white-space: nowrap;
 }
 .status-online { color: #10b981; background: rgba(16,185,129,0.1); }
 .status-offline { color: #ef4444; background: rgba(239,68,68,0.12); }
+.status-idle { color: #94a3b8; background: rgba(148,163,184,0.12); }
 .status-ml { color: #94a3b8; background: rgba(148,163,184,0.12); }
 .status-ml.status-online { color: #10b981; background: rgba(16,185,129,0.1); }
 .status-ml.status-offline { color: #f59e0b; background: rgba(245,158,11,0.12); }
@@ -255,13 +256,6 @@ body {
 .edit-mode-btns { display: flex; gap: 6px; margin-bottom: 8px; }
 .edit-mode-btns .mini-btn { margin-bottom: 0; flex: 1; }
 .edit-mode-btns .mini-btn.active { border-color: var(--accent-red); color: var(--accent-red); background: #fef2f2; }
-
-/* Панель кисти — внутри more-menu (справа от toolbar, без пересечения) */
-.more-menu .edit-area-controls {
-    padding: 10px 14px;
-    border-top: 1px solid #f1f5f9;
-    background: #f8fafc;
-}
 .more-menu .edit-area-controls .mini-btn.mini-btn-red {
     width: 100%;
     margin-top: 8px;
@@ -355,7 +349,7 @@ body {
     padding: 0;
     border: none;
     background: transparent;
-    color: #64748b;
+    color: var(--accent-red);
     font-size: var(--fs-sm);
     font-weight: 500;
     cursor: pointer;
@@ -365,7 +359,7 @@ body {
     transition: color 0.15s;
 }
 .account-back-btn svg { flex-shrink: 0; }
-.account-back-btn:hover { color: var(--accent-red); }
+.account-back-btn:hover { opacity: 0.8; }
 .map-text-label {
     background: rgba(18,20,32,0.88); color: #fff; font-size: var(--fs-sm);
     padding: 4px 8px; border-radius: 6px; white-space: nowrap; font-family: var(--font-main);
@@ -423,6 +417,8 @@ body {
     color: #475569; font-size: var(--fs-base); font-family: var(--font-main); cursor: pointer; margin-bottom: 0.75rem;
 }
 .mini-btn:hover { border-color: var(--accent-red); color: var(--accent-red); }
+.mini-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.mini-btn:disabled:hover { border-color: #cbd5e1; color: #475569; }
 .mini-btn-red { background: var(--accent-red); color: #fff; border: none; }
 .mini-btn-red:hover { opacity: 0.9; color: #fff; }
 .mini-btn-red:disabled { opacity: 0.45; cursor: not-allowed; }
@@ -628,6 +624,7 @@ span.color-box { display: inline-block; border: 1.5px solid #e2e8f0; }
 .drop-zone small { font-size: var(--fs-xs); color: #cbd5e1; }
 .text-highlight { color: var(--accent-red); }
 .upload-status { font-size: var(--fs-sm); color: #10b981; margin: 8px; min-height: 16px; }
+.upload-status.is-error { color: var(--accent-red); }
 .upload-progress { height: 6px; background: #e2e8f0; border-radius: 999px; overflow: hidden; margin: 8px 0; }
 .upload-progress-bar { height: 100%; width: 0%; background: var(--accent-red); border-radius: 999px; transition: width 0.2s ease; }
 
@@ -650,7 +647,7 @@ span.color-box { display: inline-block; border: 1.5px solid #e2e8f0; }
     box-shadow: 0 6px 16px rgba(15,23,42,0.12);
 }
 
-/* Справа: сегментация сверху, инструменты ниже — центр карты свободен */
+/* Справа: сегментация сверху, инструменты ниже — обе сворачиваемые карточки, центр карты свободен */
 .map-right-stack {
     position: absolute;
     top: 12px;
@@ -659,48 +656,76 @@ span.color-box { display: inline-block; border: 1.5px solid #e2e8f0; }
     display: flex;
     flex-direction: column;
     align-items: flex-end;
-    gap: 12px;
-    max-height: calc(100% - 48px);
+    gap: 10px;
+    max-height: calc(100% - 24px);
     pointer-events: none;
+    /* overflow специально НЕ ограничен: меню «Ещё» всплывает сбоку от панели
+       инструментов (position:absolute) и не должно обрезаться этим контейнером. */
 }
-.map-right-stack > * { pointer-events: auto; }
+.map-right-stack > * { pointer-events: auto; flex-shrink: 0; }
 
-.map-right-tools {
-    position: relative;
-    display: flex;
-    flex-direction: row-reverse;
-    align-items: flex-start;
-    gap: 8px;
-}
 .map-action-btn {
     width: 32px; height: 32px; border: none; border-radius: 6px; background: #fff;
     color: #64748b; cursor: pointer; display: grid; place-items: center;
 }
 .map-action-btn:hover { background: #fef2f2; color: var(--accent-red); }
 
-.map-seg-panel {
-    position: relative;
-    top: auto;
-    left: auto;
-    z-index: 1;
+/* Общая «карточка» для Сегментации и Инструментов — сворачивается по клику
+   на заголовок, но никогда не требует внутреннего скролла: раскрытое тело
+   всегда высотой ровно по контенту (grid-rows 0fr↔1fr, не max-height). */
+.map-card {
     width: min(280px, calc(100vw - 120px));
-    max-height: min(360px, calc(100vh - 280px));
-    overflow-y: auto;
     background: rgba(255, 255, 255, 0.97);
     border: 1px solid #e2e8f0;
     border-radius: 14px;
     box-shadow: 0 10px 30px rgba(15, 23, 42, 0.16);
-    padding: 12px 14px;
     font-family: var(--font-main);
+    overflow: hidden;
 }
-.map-seg-title {
+.map-card-header {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 14px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font-family: var(--font-main);
+    text-align: left;
+}
+.map-card-header:hover { background: #f8fafc; }
+.map-card-title {
     font-size: 12px;
     font-weight: 700;
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: #64748b;
-    margin-bottom: 10px;
+    flex-shrink: 0;
 }
+.map-card-summary {
+    display: none;
+    min-width: 0;
+    flex: 1;
+    color: #94a3b8;
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+}
+.map-card.collapsed .map-card-summary { display: block; }
+.map-card-chevron { flex-shrink: 0; color: #94a3b8; transition: transform 0.2s ease; }
+.map-card.collapsed .map-card-chevron { transform: rotate(-90deg); }
+.map-card-body {
+    display: grid;
+    grid-template-rows: 1fr;
+    transition: grid-template-rows 0.22s ease;
+}
+.map-card.collapsed .map-card-body { grid-template-rows: 0fr; }
+.map-card-body-clip { overflow: hidden; min-height: 0; }
+.map-card-body-inner { padding: 0 14px 14px; }
+
 .map-seg-row { display: flex; gap: 8px; margin-bottom: 8px; }
 .map-seg-btn {
     flex: 1;
@@ -808,12 +833,6 @@ span.color-box { display: inline-block; border: 1.5px solid #e2e8f0; }
 .field-map-label strong { display: block; font-size: 12px; }
 .field-area { font-size: var(--fs-sm); color: #475569; margin-bottom: 10px; }
 .field-crop-result { font-size: var(--fs-sm); margin-bottom: 8px; padding: 8px; background: #fff; border-radius: 6px; border: 1px solid #e2e8f0; }
-.field-crop-result.warn { border-color: #fbbf24; background: #fffbeb; }
-.crop-table-wrap { max-height: 200px; overflow-y: auto; margin-bottom: 10px; }
-.crop-table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
-.crop-table th, .crop-table td { padding: 6px 8px; text-align: left; border-bottom: 1px solid #e2e8f0; }
-.crop-table th { color: #94a3b8; font-size: var(--fs-xxs); font-weight: 700; letter-spacing: 0.5px; }
-.crop-table tr.top-crop td { background: #fef2f2; font-weight: 600; color: var(--accent-red); }
 .field-actions { display: flex; gap: 8px; }
 .field-actions .mini-btn { flex: 1; margin-bottom: 0; }
 
@@ -851,11 +870,16 @@ span.color-box { display: inline-block; border: 1.5px solid #e2e8f0; }
 /* Под скрин: белая карта-панель слева + лёгкий бордер */
 .map-area { background: #fff; }
 
+.map-right-tools {
+    position: relative;
+    display: flex;
+    flex-direction: row-reverse;
+    align-items: flex-start;
+    gap: 8px;
+}
 .map-toolbar {
     position: relative;
-    top: auto;
-    right: auto;
-    left: auto;
+    top: auto; right: auto; left: auto;
     transform: none;
     flex-shrink: 0;
     background: rgba(255,255,255,0.95);
@@ -896,37 +920,53 @@ span.color-box { display: inline-block; border: 1.5px solid #e2e8f0; }
     white-space: nowrap; z-index: 2000; pointer-events: none;
 }
 
+/* Всплывает слева от панели инструментов (как раньше). Внутри — свой
+   заголовок с шевроном: всё окно (список действий + панель кисти/ластика,
+   когда активна) можно свернуть в одну строку, не закрывая его совсем. */
 .more-menu {
     display: none;
     position: absolute;
     top: 0;
-    right: calc(100% + 8px); /* слева от панели инструментов */
+    right: calc(100% + 8px);
     left: auto;
     transform: none;
     background: #fff;
     border-radius: 10px;
     box-shadow: 0 6px 16px rgba(0,0,0,0.15);
     z-index: 1500;
-    min-width: 240px;
-    max-width: min(280px, calc(100vw - 120px));
+    width: min(280px, calc(100vw - 120px));
     max-height: min(420px, calc(100vh - 200px));
-    overflow-x: hidden;
-    overflow-y: auto;
+    overflow: hidden;
 }
 .more-menu.active { display: block; }
+.more-menu.collapsed .map-card-body { grid-template-rows: 0fr; }
+.more-menu.collapsed .map-card-chevron { transform: rotate(-90deg); }
+.more-menu .map-card-header { padding: 10px 14px; }
+.more-menu .map-card-body-clip { max-height: min(380px, calc(100vh - 260px)); overflow-y: auto; }
+.more-menu-clip { border-top: 1px solid #f1f5f9; }
 .more-menu-item { padding: 10px 14px; cursor: pointer; display: flex; align-items: center; gap: 10px; font-size: var(--fs-base); color: #334155; border-bottom: 1px solid #f1f5f9; flex-wrap: wrap; }
 .more-menu-item:last-child { border-bottom: none; }
 .more-menu-item:hover { background: #fef2f2; color: var(--accent-red); }
 .more-menu-item small { flex-basis: 100%; color: #94a3b8; font-size: var(--fs-xxs); margin-left: 26px; }
 .more-menu-item:hover small { color: #cf7f8a; }
+.more-menu-item#merge-menu-item { border-bottom: none; }
+.more-menu-item#merge-menu-item.active { background: #fef2f2; color: var(--accent-red); }
+
+/* Панель «Объединить полигоны» — появляется прямо под пунктом меню, пока
+   выбираются области кликами (без Ctrl/Shift). */
+.merge-mode-panel { padding: 4px 14px 12px; border-bottom: 1px solid #f1f5f9; }
+.merge-mode-hint { font-size: var(--fs-xs); color: #94a3b8; margin: 0 0 8px 26px; }
+.merge-mode-btns { display: flex; gap: 6px; }
+.merge-mode-btns .mini-btn { margin-bottom: 0; flex: 1; }
 
 .hidden-color-input { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
 
 .bottom-bar {
     height: 30px; background: var(--bg-dark); color: #94a3b8; display: flex; align-items: center;
     padding: 0 1.5rem; font-size: var(--fs-sm); font-family: 'Courier New', monospace; z-index: 1000; gap: 20px;
+    overflow: hidden;
 }
-.bottom-bar-sep { color: #64748b; }
+.bottom-bar-sep { color: #64748b; flex-shrink: 0; white-space: nowrap; }
 
 .dzz-sites-bar {
     display: none;
@@ -1209,11 +1249,28 @@ span.color-box { display: inline-block; border: 1.5px solid #e2e8f0; }
     color: var(--accent-red);
     background: #fef2f2;
 }
-.toast { color: #10b981; font-family: var(--font-main); }
-.legend { margin-left: auto; font-family: var(--font-main); }
-.legend-item { display: inline-flex; align-items: center; gap: 6px; margin-left: 10px; }
-.legend-swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-.legend-text { font-size: var(--fs-sm); color: #cbd5e1; }
+/* Длинный текст (тост, название импортированного слоя) в узкой 30px-строке
+   статус-бара раньше переносился на вторую строку и вылезал за её границы —
+   теперь обрезается многоточием и никогда не растягивает строку по высоте. */
+.toast {
+    color: #10b981; font-family: var(--font-main);
+    flex: 1 1 auto; min-width: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.toast.toast-error { color: var(--accent-red); }
+.legend {
+    margin-left: auto; font-family: var(--font-main);
+    display: flex; align-items: center; min-width: 0; overflow: hidden;
+}
+.legend-item {
+    display: inline-flex; align-items: center; gap: 6px; margin-left: 10px;
+    min-width: 0; max-width: 220px;
+}
+.legend-swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.legend-text {
+    font-size: var(--fs-sm); color: #cbd5e1;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
 
 /* Зум карты — единый размер и стиль с панелью инструментов, левый нижний угол,
    с отступом над нижней панелью координат (30px), чтобы ничего не обрезалось */
@@ -1357,6 +1414,27 @@ span.color-box { display: inline-block; border: 1.5px solid #e2e8f0; }
     border: 1px solid var(--border-color); background: #fff;
     font-size: var(--fs-sm); color: #334155; font-family: var(--font-main);
 }
+.history-filter-dropdown { position: relative; }
+.history-filter-btn {
+    display: flex; align-items: center; gap: 8px; cursor: pointer;
+    white-space: nowrap; max-width: 190px;
+}
+.history-filter-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-filter-btn svg { flex-shrink: 0; transition: transform 0.15s; }
+.history-filter-btn.open svg { transform: rotate(180deg); }
+.history-filter-menu {
+    position: absolute; top: calc(100% + 4px); right: 0; z-index: 20;
+    background: #fff; border: 1px solid var(--border-color); border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12); padding: 6px; min-width: 200px;
+}
+.history-filter-option {
+    display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 6px;
+    font-size: var(--fs-sm); color: #334155; cursor: pointer; white-space: nowrap;
+}
+.history-filter-option:hover { background: #f8fafc; }
+.history-filter-option input { margin: 0; accent-color: var(--accent-red); cursor: pointer; }
+.history-filter-option-all { font-weight: 600; }
+.history-filter-sep { height: 1px; background: #f1f5f9; margin: 4px 2px; }
 .stat-badge { padding: 3px 9px; border-radius: 10px; font-size: var(--fs-xxs); font-weight: 600; }
 .stat-green { background: #ecfdf5; color: #10b981; }
 .stat-red { background: #fef2f2; color: #ef4444; }

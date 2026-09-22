@@ -13,7 +13,7 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
 
-<link rel="stylesheet" href="style.css?v=20260904-dock">
+<link rel="stylesheet" href="style.css?v=20260923-tile-loading">
 </head>
 <body>
 
@@ -276,16 +276,6 @@
                     </div>
                     <div class="field-area">Площадь: <strong id="field-area-value">—</strong></div>
                     <div class="field-crop-result" id="field-crop-result"></div>
-                    <div class="crop-table-wrap">
-                        <table class="crop-table" id="crop-table">
-                            <thead><tr><th>Сельхозкультура</th><th>Вероятность</th></tr></thead>
-                            <tbody id="crop-table-body"></tbody>
-                        </table>
-                    </div>
-                    <div class="field-actions">
-                        <button class="mini-btn mini-btn-red" onclick="confirmFieldCrop()">Подтвердить</button>
-                        <button class="mini-btn" onclick="manualFieldCrop()">Изменить вручную</button>
-                    </div>
                     </div>
                 </div>
 
@@ -363,6 +353,11 @@
                     <span class="checkmark"></span>
                     <span>Пропуск сеялки</span>
                 </label>
+                <label class="settings-toggle">
+                    <input type="checkbox" id="opt-obstacle">
+                    <span class="checkmark"></span>
+                    <span>Столбы, деревья (препятствия)</span>
+                </label>
 
                 <div class="settings-section-title">Аномалии посева</div>
                 <label class="settings-toggle">
@@ -425,7 +420,7 @@
                         <label>z <input id="opt-dzz-tile-z" class="dzz-tile-input" type="number" min="0" max="22" inputmode="numeric"></label>
                         <label>x <input id="opt-dzz-tile-x" class="dzz-tile-input dzz-tile-input-wide" type="number" min="0" inputmode="numeric"></label>
                         <label>y <input id="opt-dzz-tile-y" class="dzz-tile-input dzz-tile-input-wide" type="number" min="0" inputmode="numeric"></label>
-                        <button type="button" class="mini-btn dzz-tile-go" onclick="goToDzzTileFromForm()">Перейти</button>
+                        <button type="button" class="mini-btn dzz-tile-go" onclick="goToDzzTileFromForm('opt')">Перейти</button>
                     </div>
                     <div class="dzz-tile-nav dzz-tile-nav-settings">
                         <button type="button" onclick="shiftDzzTile(0,-1)" title="Север">↑</button>
@@ -512,10 +507,17 @@
                 </button>
             </div>
 
-            <!-- Справа: сегментация сверху, инструменты ниже -->
+            <!-- Справа: сегментация сверху, инструменты ниже — обе панели сворачиваемые -->
             <div class="map-right-stack">
-                <div class="map-seg-panel" id="map-seg-panel">
-                    <div class="map-seg-title">Сегментация</div>
+                <div class="map-card" id="map-seg-panel">
+                    <button type="button" class="map-card-header" id="seg-panel-toggle" onclick="toggleSegPanel()" aria-expanded="true" title="Свернуть/развернуть панель сегментации">
+                        <span class="map-card-title">Сегментация</span>
+                        <span class="map-card-summary" id="map-seg-summary"></span>
+                        <svg class="map-card-chevron" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg>
+                    </button>
+                    <div class="map-card-body">
+                    <div class="map-card-body-clip">
+                    <div class="map-card-body-inner">
                     <div class="map-seg-row">
                         <button type="button" class="map-seg-btn" id="map-btn-aoi" onclick="startAoiSelection()">Выделить область</button>
                         <button type="button" class="map-seg-btn map-seg-btn-ghost" id="map-btn-clear-aoi" onclick="clearAoiSelection()">Сброс</button>
@@ -534,9 +536,12 @@
                     </div>
                     <div class="map-seg-hint" id="map-seg-status">Выделите область на карте или сегментируйте весь кадр</div>
                     <div class="map-seg-progress" id="map-seg-progress" style="display:none;"><div id="map-seg-progress-bar"></div></div>
+                    </div>
+                    </div>
+                    </div>
                 </div>
 
-                <div class="map-right-tools">
+                <div class="map-right-tools" id="map-tools-card">
                     <div class="map-toolbar" id="map-toolbar">
                         <div class="tool-btn active" data-tool="select" onclick="setTool('select', event)" title="Выделить область">
                             <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><path d="M4 4l7 16 2.5-6.5L20 11 4 4z"></path></svg>
@@ -555,13 +560,20 @@
                             <span class="tool-tip">Текст — пометка на карте для команды</span>
                         </div>
 
-                        <div class="tool-btn tool-more" id="tool-more-btn" onclick="toggleMoreMenu(event)" title="Ещё">
+                        <div class="tool-btn tool-more" id="tool-more-btn" onclick="toggleMoreMenu(event)" title="Ещё" aria-expanded="false">
                             <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><circle cx="5" cy="12" r="2"></circle><circle cx="12" cy="12" r="2"></circle><circle cx="19" cy="12" r="2"></circle></svg>
                             <span class="tool-tip">Дополнительные действия с областями</span>
                         </div>
                     </div>
 
                     <div id="more-menu" class="more-menu">
+                    <button type="button" class="map-card-header" id="more-menu-toggle" onclick="toggleMoreMenuBody(event)" aria-expanded="true" title="Свернуть/развернуть окно инструментов">
+                        <span class="map-card-title">Инструменты</span>
+                        <svg class="map-card-chevron" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg>
+                    </button>
+                    <div class="map-card-body" id="more-menu-body">
+                    <div class="map-card-body-clip">
+                    <div class="more-menu-clip">
                 <div class="more-menu-item" onclick="startCreateArea()">
                     <svg class="menu-icon-svg" viewBox="0 0 100 100" width="18" height="18" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="currentColor" d="M32.5 10.95c-6.89 0-12.55 5.66-12.55 12.55c0 4.02 1.935 7.613 4.91 9.916L14.815 54.172a12.354 12.354 0 0 0-2.316-.223C5.61 53.95-.05 59.61-.05 66.5c0 6.89 5.66 12.55 12.55 12.55c5.13 0 9.54-3.151 11.463-7.603l51.277 7.71c1.232 5.629 6.281 9.894 12.26 9.894c6.656 0 12.114-5.297 12.48-11.867a3.5 3.5 0 0 0 .07-.684a3.5 3.5 0 0 0-.071-.7c-.375-6.562-5.829-11.85-12.479-11.85c-.134 0-.264.015-.396.019L80.242 43.05c3.275-2.127 5.509-5.746 5.738-9.867a3.5 3.5 0 0 0 .07-.684a3.5 3.5 0 0 0-.071-.7c-.375-6.562-5.829-11.85-12.479-11.85c-5.062 0-9.452 3.06-11.43 7.415l-17.082-4.517a3.5 3.5 0 0 0-.01-.047c-.374-6.563-5.828-11.852-12.478-11.852zm0 7c3.107 0 5.55 2.443 5.55 5.55c0 3.107-2.443 5.55-5.55 5.55c-3.107 0-5.55-2.443-5.55-5.55c0-3.107 2.443-5.55 5.55-5.55zm41 9c3.107 0 5.55 2.443 5.55 5.55c0 3.107-2.443 5.55-5.55 5.55c-3.107 0-5.55-2.443-5.55-5.55c0-3.107 2.443-5.55 5.55-5.55zm-30.137 2.708l17.739 4.69C62.007 40.37 67.239 45.05 73.5 45.05l.033-.002l6.92 21.092a12.688 12.688 0 0 0-4.705 6.015l-50.916-7.654a12.611 12.611 0 0 0-3.787-7.13l10.342-21.378c.368.033.737.057 1.113.057c4.652 0 8.71-2.592 10.863-6.393zM12.5 60.95c3.107 0 5.55 2.444 5.55 5.551s-2.443 5.55-5.55 5.55c-3.107 0-5.55-2.443-5.55-5.55c0-3.107 2.443-5.55 5.55-5.55zm75 10c3.107 0 5.55 2.444 5.55 5.551s-2.443 5.55-5.55 5.55c-3.107 0-5.55-2.443-5.55-5.55c0-3.107 2.443-5.55 5.55-5.55z"/></svg>
                     Создать область
@@ -572,10 +584,17 @@
                     Редактирование области
                     <small>Кисть и ластик (reshape / freehand cut)</small>
                 </div>
-                <div class="more-menu-item" onclick="mergeLayerPolygons()">
+                <div class="more-menu-item" id="merge-menu-item" onclick="startMergePolygonsMode()">
                     <svg class="menu-icon-svg" fill="currentColor" viewBox="0 0 512 512" width="18" height="18" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M395.636,232.727c12.87,0,23.273-10.426,23.273-23.273c0-12.846-10.403-23.273-23.273-23.273h-23.273 c-12.87,0-23.273,10.426-23.273,23.273c0,12.847,10.403,23.273,23.273,23.273H395.636z"/><path d="M232.727,465.455h-23.273c-12.87,0-23.273,10.426-23.273,23.273S196.585,512,209.455,512h23.273 c12.87,0,23.273-10.426,23.273-23.273S245.597,465.455,232.727,465.455z"/><path d="M209.455,372.364c-12.87,0-23.273,10.426-23.273,23.273v23.273c0,12.847,10.403,23.273,23.273,23.273 c12.87,0,23.273-10.426,23.273-23.273v-23.273C232.727,382.79,222.324,372.364,209.455,372.364z"/><path d="M209.455,349.091c12.87,0,23.273-10.426,23.273-23.273h46.545h23.273c12.87,0,23.273-10.426,23.273-23.273v-69.818 v-23.273V23.273C325.818,10.426,315.415,0,302.545,0H23.273C10.403,0,0,10.426,0,23.273v279.273 c0,12.847,10.403,23.273,23.273,23.273h162.909C186.182,338.665,196.585,349.091,209.455,349.091z"/><path d="M325.818,465.455h-23.273c-12.87,0-23.273,10.426-23.273,23.273S289.676,512,302.545,512h23.273 c12.87,0,23.273-10.426,23.273-23.273S338.688,465.455,325.818,465.455z"/><path d="M488.727,256c-12.87,0-23.273,10.426-23.273,23.273v23.273c0,12.847,10.403,23.273,23.273,23.273 S512,315.392,512,302.545v-23.273C512,266.426,501.597,256,488.727,256z"/><path d="M488.727,349.091c-12.87,0-23.273,10.426-23.273,23.273v23.273c0,12.847,10.403,23.273,23.273,23.273 S512,408.483,512,395.636v-23.273C512,359.517,501.597,349.091,488.727,349.091z"/><path d="M488.727,442.182c-12.87,0-23.273,10.426-23.273,23.273v23.273c0,12.847,10.403,23.273,23.273,23.273 S512,501.574,512,488.727v-23.273C512,452.608,501.597,442.182,488.727,442.182z"/><path d="M418.909,465.455h-23.273c-12.87,0-23.273,10.426-23.273,23.273S382.767,512,395.636,512h23.273 c12.87,0,23.273-10.426,23.273-23.273S431.779,465.455,418.909,465.455z"/><path d="M488.727,232.727c12.87,0,23.273-10.426,23.273-23.273c0-12.846-10.403-23.273-23.273-23.273h-23.273 c-12.87,0-23.273,10.426-23.273,23.273c0,12.847,10.403,23.273,23.273,23.273H488.727z"/></svg>
                     Объединить полигоны
-                    <small>Выделите 2+ полигона (Ctrl) и объедините</small>
+                    <small>Кликните по 2–3 областям одного слоя</small>
+                </div>
+                <div id="merge-mode-panel" class="merge-mode-panel" style="display:none;">
+                    <div class="merge-mode-hint" id="merge-mode-hint">Выбрано: 0</div>
+                    <div class="merge-mode-btns">
+                        <button type="button" class="mini-btn mini-btn-red" id="merge-confirm-btn" onclick="confirmMergePolygons()" disabled>Объединить</button>
+                        <button type="button" class="mini-btn" onclick="cancelMergeMode()">Отмена</button>
+                    </div>
                 </div>
                 <!-- Панель кисти/ластика — внутри меню «Ещё», не пересекается с основной панелью -->
                 <div id="edit-area-controls" class="edit-area-controls" style="display:none;">
@@ -595,7 +614,10 @@
                     <button type="button" class="mini-btn mini-btn-red" onclick="finishEditAreaMode()">Готово</button>
                 </div>
                     </div>
+                    </div>
+                    </div>
                 </div>
+            </div>
             </div>
 
             <input type="color" id="paint-color-input" class="hidden-color-input" style="display:none">
@@ -625,7 +647,7 @@
                             <input id="dzz-bar-z" class="dzz-tile-input" type="number" min="0" max="22" inputmode="numeric" aria-label="z">
                             <input id="dzz-bar-x" class="dzz-tile-input dzz-tile-input-wide" type="number" min="0" inputmode="numeric" aria-label="x">
                             <input id="dzz-bar-y" class="dzz-tile-input dzz-tile-input-wide" type="number" min="0" inputmode="numeric" aria-label="y">
-                            <button type="button" class="dzz-sites-exit" onclick="goToDzzTileFromForm()">Перейти</button>
+                            <button type="button" class="dzz-sites-exit" onclick="goToDzzTileFromForm('bar')">Перейти</button>
                             <div class="dzz-tile-nav">
                                 <button type="button" onclick="shiftDzzTile(0,-1)" title="Север">↑</button>
                                 <button type="button" onclick="shiftDzzTile(-1,0)" title="Запад">←</button>
@@ -643,6 +665,7 @@
                 <span class="bottom-bar-sep" id="tile-display">z/x/y —</span>
                 <span class="bottom-bar-sep" id="crs-display">EPSG:3857</span>
                 <span class="bottom-bar-sep" id="scale-display">1:25 000</span>
+                <span class="bottom-bar-sep" id="tiles-loading-indicator" style="display:none;">Загрузка тайлов…</span>
                 <span id="toast" class="toast"></span>
                 <div class="legend" id="legend"></div>
             </div>
@@ -680,13 +703,35 @@
                         <div class="history-header">
                             <div class="card-title">ИСТОРИЯ АКТИВНОСТИ</div>
                             <div class="history-controls">
-                                <select id="history-filter" class="history-filter" onchange="renderHistoryFeed()">
-                                    <option value="all">Все</option>
-                                    <option value="account">Аккаунт</option>
-                                    <option value="tool">Инструменты и карта</option>
-                                    <option value="export">Экспорт</option>
-                                    <option value="process">Загрузка и обработка</option>
-                                </select>
+                                <div class="history-filter-dropdown" id="history-filter-dropdown">
+                                    <button type="button" class="history-filter history-filter-btn" id="history-filter-btn" onclick="toggleHistoryFilterMenu()">
+                                        <span id="history-filter-label">Все</span>
+                                        <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M1.5 3.5L5 7L8.5 3.5" stroke="#64748b" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                                    </button>
+                                    <div class="history-filter-menu" id="history-filter-menu" style="display:none;">
+                                        <label class="history-filter-option history-filter-option-all">
+                                            <input type="checkbox" id="history-filter-all" checked onchange="toggleHistoryFilterAll(this.checked)">
+                                            <span>Все</span>
+                                        </label>
+                                        <div class="history-filter-sep"></div>
+                                        <label class="history-filter-option">
+                                            <input type="checkbox" class="history-filter-cat" value="account" checked onchange="onHistoryFilterCatChange()">
+                                            <span>Аккаунт</span>
+                                        </label>
+                                        <label class="history-filter-option">
+                                            <input type="checkbox" class="history-filter-cat" value="tool" checked onchange="onHistoryFilterCatChange()">
+                                            <span>Инструменты и карта</span>
+                                        </label>
+                                        <label class="history-filter-option">
+                                            <input type="checkbox" class="history-filter-cat" value="export" checked onchange="onHistoryFilterCatChange()">
+                                            <span>Экспорт</span>
+                                        </label>
+                                        <label class="history-filter-option">
+                                            <input type="checkbox" class="history-filter-cat" value="process" checked onchange="onHistoryFilterCatChange()">
+                                            <span>Загрузка и обработка</span>
+                                        </label>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                         <div class="history-toolbar">
@@ -790,7 +835,8 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
 <script src="https://unpkg.com/shpjs@latest/dist/shp.js"></script>
-<script src="https://unpkg.com/shp-write@latest/shpwrite.js"></script>
-<script src="app.js?v=20260904-dock"></script>
+<script src="https://unpkg.com/shp-write@0.2.5/shpwrite.js"></script>
+<script src="https://unpkg.com/polybooljs@1.2.0/dist/polybool.js"></script>
+<script src="app.js?v=20260923-tile-loading"></script>
 </body>
 </html>
