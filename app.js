@@ -1229,9 +1229,7 @@ function applyDisplaySettings() {
         entry.group.eachLayer(l => {
             const sel = selectedFeatures.find(s => s.layer === l);
             if (sel) {
-                const base = getFeatureBaseStyle(sel.layerId, l);
-                const fill = Math.min(0.85, (base.fillOpacity || 0.35) + 0.2);
-                l.setStyle({ ...base, weight: lw + 3, color: '#ffffff', fillOpacity: fill });
+                applySelectedFeatureStyle(l, sel.layerId);
             } else {
                 l.setStyle({ ...getFeatureBaseStyle(entry.id, l), weight: lw });
             }
@@ -3042,6 +3040,7 @@ let vertexMarkers = [];
 let activeDrawHandler = null;
 let compassCenter = null;
 let compassLayer = null;
+let lastCompassCircle = null; // { center, radiusM } — последний завершённый круг циркуля
 let textLayerGroup = null;
 let overlaysLayerGroup = null;
 let uploadedFile = null;
@@ -3957,7 +3956,6 @@ function initMap() {
     initSidebarResize();
     initNetworkStatus();
     populateDrawLayerSelect();
-    populateCreateCropSelect();
 
     document.addEventListener('click', (e) => {
         // во время freehand панель кисти внутри more-menu — не закрывать
@@ -4228,12 +4226,14 @@ function onGlobalKeyDown(e) {
     }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'm') {
         e.preventDefault();
-        if (selectedFeatures.length >= 2) {
+        if (selectedFeatures.length === 2) {
             const layerIds = new Set(selectedFeatures.map(s => s.layerId));
             if (layerIds.size !== 1) showToast('Объединять можно только области одного слоя', true);
             else mergeSelectedPolygons(selectedFeatures);
+        } else if (selectedFeatures.length > 2) {
+            showToast('За раз можно объединить только 2 области', true);
         } else {
-            showToast('Выделите 2+ объекта одного слоя (Ctrl/⌘/Shift + клик), затем Ctrl+M', true);
+            showToast('Выделите ровно 2 объекта одного слоя (Ctrl/⌘/Shift + клик), затем Ctrl+M', true);
         }
         return;
     }
@@ -4261,7 +4261,6 @@ function cancelActiveTool() {
     }
     stopFreehandEdit();
     destroyPaintSession();
-    setMoreMenuOpen(false);
     document.getElementById('edit-area-controls').style.display = 'none';
     editDrawMode = null;
     deactivateCurrentTool();
@@ -4274,6 +4273,42 @@ function getFeatureBaseStyle(layerId, layer = null) {
     const color = entry?.color || '#3388ff';
     const isPoint = layerId === 'points' || layer?._isPointObject;
     return { color, weight: displaySettings.lineWidth, fillColor: color, fillOpacity: getFillOpacity(isPoint) };
+}
+
+/**
+ * Подсветка выделения. ВАЖНО: у самого интерактивного полигона толщину линии
+ * не увеличиваем — увеличенная обводка расширяет его кликабельную область за
+ * пределы контура и «перехватывает» клики по соседней области с общей
+ * границей (клик рядом с границей снова попадал на уже выбранную область
+ * вместо соседней). Толстая белая обводка — отдельный некликабельный слой
+ * поверх, чисто для вида.
+ */
+function applySelectedFeatureStyle(layer, layerId) {
+    const base = getFeatureBaseStyle(layerId, layer);
+    const fill = Math.min(0.85, (base.fillOpacity || 0.35) + 0.2);
+    layer.setStyle({ ...base, color: '#ffffff', fillOpacity: fill });
+    clearSelectionOutline(layer);
+    if (map && layer.getLatLngs) {
+        const outline = L.polygon(layer.getLatLngs(), {
+            color: '#ffffff', weight: base.weight + 3, fill: false,
+            interactive: false, className: 'selection-outline',
+        }).addTo(map);
+        layer._selectionOutline = outline;
+    }
+    if (layer.bringToFront) layer.bringToFront();
+    if (layer._selectionOutline?.bringToFront) layer._selectionOutline.bringToFront();
+}
+
+function clearSelectionOutline(layer) {
+    if (layer._selectionOutline) {
+        if (map) map.removeLayer(layer._selectionOutline);
+        layer._selectionOutline = null;
+    }
+}
+
+function resetFeatureStyle(layer, layerId) {
+    layer.setStyle(getFeatureBaseStyle(layerId, layer));
+    clearSelectionOutline(layer);
 }
 
 function deleteCurrentMapSelection() {
@@ -4407,7 +4442,7 @@ function jumpToSelectionHistory() {
 
 function clearSelection() {
     selectedFeatures.forEach(({ layer, layerId }) => {
-        layer.setStyle(getFeatureBaseStyle(layerId, layer));
+        resetFeatureStyle(layer, layerId);
     });
     selectedFeatures = [];
     clearVertexMarkers();
@@ -4421,7 +4456,7 @@ function selectFeature(layer, layerId, multi = false) {
     } else {
         const idx = selectedFeatures.findIndex(s => s.layer === layer);
         if (idx >= 0) {
-            layer.setStyle(getFeatureBaseStyle(layerId, layer));
+            resetFeatureStyle(layer, layerId);
             selectedFeatures.splice(idx, 1);
             if (selectedFeatures.length === 1) {
                 showVertexMarkers(selectedFeatures[0].layer, selectedFeatures[0].layerId);
@@ -4445,10 +4480,7 @@ function selectFeature(layer, layerId, multi = false) {
     }
     selectedOverlay = null;
     selectedFeatures.forEach(({ layer: l, layerId: lid }) => {
-        const base = getFeatureBaseStyle(lid, l);
-        const fill = Math.min(0.85, (base.fillOpacity || 0.35) + 0.2);
-        l.setStyle({ ...base, weight: base.weight + 3, color: '#ffffff', fillOpacity: fill });
-        if (l.bringToFront) l.bringToFront();
+        applySelectedFeatureStyle(l, lid);
     });
     if (selectedFeatures.length === 1) {
         showVertexMarkers(selectedFeatures[0].layer, selectedFeatures[0].layerId);
@@ -4980,12 +5012,18 @@ function selectFieldInList(layerId, fieldMetaId) {
 function calcFieldAreaHa(layer) {
     if (!layer?.getLatLngs) return 0;
     const latlngs = layer.getLatLngs();
-    const ring = Array.isArray(latlngs[0]) ? latlngs[0] : latlngs;
-    if (ring.length < 3) return 0;
+    const rings = Array.isArray(latlngs[0]) ? latlngs : [latlngs];
+    if (!rings.length || rings[0].length < 3) return 0;
     // Реальная (геодезическая) площадь по lat/lng — не зависит от текущего зума карты.
     // map.project() отдаёт пиксели ТЕКУЩЕГО зума, поэтому площадь через них была бы
     // разной при разном приближении карты — здесь этой ошибки нет.
-    const m2 = L.GeometryUtil.geodesicArea(ring);
+    // Кольца после первого — дыры (вырезанные ластиком/циркулем острова
+    // внутри контура): их площадь вычитаем, иначе гектары считались бы «по
+    // внешней границе», как будто дыры не существует.
+    let m2 = L.GeometryUtil.geodesicArea(rings[0]);
+    for (let i = 1; i < rings.length; i++) {
+        if (rings[i].length >= 3) m2 -= L.GeometryUtil.geodesicArea(rings[i]);
+    }
     return m2 / 10000;
 }
 
@@ -5002,11 +5040,7 @@ function showFieldDetail(layer, layerId) {
         ? `${areaHa.toFixed(2)} га` : `${Math.round(areaHa * 10000)} м²`;
 
     // Культура задаётся только вручную — автоматического определения нет.
-    const resultEl = document.getElementById('field-crop-result');
-    resultEl.className = 'field-crop-result';
-    resultEl.innerHTML = meta.confirmedCrop
-        ? `Культура: <strong>${formatCropDisplay(meta.confirmedCrop)}</strong>`
-        : 'Культура не задана — выберите вручную';
+    populateFieldCropSelect(meta.confirmedCrop);
     syncSidebarSelectionHighlight();
 }
 
@@ -5027,9 +5061,38 @@ function saveFieldName() {
     showToast('Название поля сохранено');
 }
 
+/** Список культур (+ «Свои культуры…») в панели «Свойства объекта» — та же
+ * культура, что и текущее значение объекта, выбирается сразу при открытии. */
+function populateFieldCropSelect(currentValue) {
+    const sel = document.getElementById('field-crop-select');
+    if (!sel) return;
+    const options = getAllCropOptions();
+    sel.innerHTML = '<option value="">— Выберите культуру —</option>' +
+        options.map(o => `<option value="${o.key}">${formatCropOptionLabel(o.key, o.label, o.custom)}</option>`).join('') +
+        '<option value="__manage__">⚙ Свои культуры…</option>';
+    sel.value = currentValue || '';
+}
+
+/** Смена культуры прямо в панели слоёв — применяется сразу к выбранному объекту. */
+function onFieldCropSelect(value) {
+    const sel = document.getElementById('field-crop-select');
+    if (value === '__manage__') {
+        if (sel) sel.value = selectedFieldLayer?._fieldMeta?.confirmedCrop || '';
+        openManageCustomCropsModal();
+        return;
+    }
+    if (!selectedFieldLayer) return;
+    const meta = ensureFieldMeta(selectedFieldLayer, selectedFieldLayerId);
+    if (value) applyCropToMeta(meta, value);
+    else { meta.confirmedCrop = null; meta.confirmed = false; }
+    renderFieldLabels();
+    renderLayersList(document.getElementById('layer-search')?.value);
+    showToast(value ? `Культура: ${formatCropDisplay(value)}` : 'Культура сброшена');
+}
+
 // Только управление списком своих культур (добавление/удаление) — культура
-// объекту назначается один раз при создании/редактировании области (блок
-// «Культура» рядом со «Слой»), здесь выбор «на что назначить» не нужен.
+// объекту назначается отдельно, в панели «Свойства объекта» (после того как
+// объект уже создан), здесь выбор «на что назначить» не нужен.
 function buildCropSelectHtml() {
     refreshCropCaches();
     return `
@@ -5059,7 +5122,7 @@ function refreshModalCustomCropList() {
             const key = btn.getAttribute('data-del-crop');
             deleteCustomCrop(key);
             refreshModalCustomCropList();
-            populateCreateCropSelect();
+            populateFieldCropSelect(selectedFieldLayer?._fieldMeta?.confirmedCrop);
             showToast('Своя культура удалена');
         };
     });
@@ -5074,7 +5137,7 @@ function wireCropModalExtras() {
             if (!key) { input?.focus(); return; }
             if (input) input.value = '';
             refreshModalCustomCropList();
-            populateCreateCropSelect();
+            populateFieldCropSelect(selectedFieldLayer?._fieldMeta?.confirmedCrop);
             showToast('Своя культура добавлена');
         };
     }
@@ -5671,7 +5734,6 @@ const TOOL_NAMES = {
 };
 
 function deactivateCurrentTool() {
-    setMoreMenuOpen(false);
     stopFreehandEdit();
     document.getElementById('map-area')?.classList.remove('tool-eraser', 'tool-brush');
     clearRulerPreview();
@@ -5713,7 +5775,11 @@ function setTool(tool) {
         mapArea.classList.add('tool-' + tool);
     }
     if (map) map.dragging.enable();
-    raiseWorkingOverlays();
+    // raiseWorkingOverlays() здесь не нужен: подложки и векторные объекты и так
+    // всегда в разных панах Leaflet (объекты поверх тайлов независимо от
+    // DOM-порядка), а сам вызов переставляет в DOM КАЖДый объект на карте —
+    // при большом количестве распознанных областей это ощутимо подтормаживало
+    // при каждом клике по инструменту (лишняя перерисовка/layout у браузера).
     if (tool !== 'freehand') {
         document.getElementById('edit-area-controls').style.display = 'none';
     }
@@ -5940,6 +6006,8 @@ function handleCompassClick(e) {
     registerMapOverlay(layers);
     compassLayer = null;
     compassCenter = null;
+    lastCompassCircle = { center: circle.getLatLng(), radiusM: radius };
+    openCompassActionPopup(e.latlng);
     showToast(`Радиус: ${label}`);
 }
 
@@ -5948,6 +6016,63 @@ function clearCompassDrawing() {
     clearCompassPreview();
     if (mapMouseMoveHandler) { map?.off('mousemove', mapMouseMoveHandler); mapMouseMoveHandler = null; }
     if (compassLayer && overlaysLayerGroup) { overlaysLayerGroup.removeLayer(compassLayer); compassLayer = null; }
+}
+
+/** Мини-панель у только что нарисованного круга циркуля: можно сразу
+ * превратить его в область на активном слое, либо вырезать этим кругом
+ * кусок из выделенного объекта — как ластиком, но точно по кругу. */
+function openCompassActionPopup(atLatLng) {
+    const canErase = selectedFeatures.length === 1;
+    const html = `
+        <div class="compass-action-popup">
+            <div class="compass-action-title">Круг циркуля</div>
+            <button type="button" class="mini-btn" onclick="createAreaFromCompassCircle()">+ Область по кругу</button>
+            <button type="button" class="mini-btn mini-btn-red" onclick="eraseWithCompassCircle()"${canErase ? '' : ' disabled title="Выделите один объект"'}>Вырезать по кругу</button>
+        </div>
+    `;
+    L.popup({ className: 'compass-popup', maxWidth: 240 })
+        .setLatLng(atLatLng)
+        .setContent(html)
+        .openOn(map);
+}
+
+/** «Циркуль как область»: последний нарисованный круг становится новым
+ * объектом на активном слое — так же, как обычная нарисованная область. */
+function createAreaFromCompassCircle() {
+    if (!lastCompassCircle) return;
+    map.closePopup();
+    const layerId = activeLayerId || 'crops';
+    const entry = findLayerEntry(layerId);
+    if (!entry) { showToast('Сначала выберите слой в панели рисования', true); return; }
+    const ring = circleToPolygon(lastCompassCircle.center, lastCompassCircle.radiusM, 48).map(c => L.latLng(c[0], c[1]));
+    addCreatedPolygon(ring, entry, layerId);
+    showToast('Область создана по кругу циркуля');
+}
+
+/** «Циркуль как ластик»: вырезает последний нарисованный круг из
+ * выделенного объекта — если круг целиком внутри контура, получается
+ * ровное круглое отверстие, а не обрезка от края, как обычным ластиком. */
+function eraseWithCompassCircle() {
+    if (!lastCompassCircle) return;
+    if (selectedFeatures.length !== 1) {
+        showToast('Выделите один объект, чтобы вырезать из него круг', true);
+        return;
+    }
+    map.closePopup();
+    const { layer, layerId } = selectedFeatures[0];
+    const proj = makeLocalProjection(lastCompassCircle.center);
+    const circleRing = circleToPolygon(lastCompassCircle.center, lastCompassCircle.radiusM, 48).map(c => L.latLng(c[0], c[1]));
+    const cutRegion = ringToPolyBoolRegion(circleRing, proj);
+    const before = JSON.parse(JSON.stringify(layer.getLatLngs()));
+    const result = applyRingDifference(layer, cutRegion, proj);
+    if (!result) { showToast('Не удалось вырезать круг', true); return; }
+    if (result.isEmpty) { showToast('Круг стирает контур целиком — удалите объект вручную, если это нужно', true); return; }
+    layer.setLatLngs(result.finalRings);
+    pushUndo({ type: 'modifyFeature', layer, before, after: layer.getLatLngs() });
+    renderFieldLabels();
+    showVertexMarkers(layer, layerId);
+    showToast(result.holesCount ? 'Вырезано отверстие по кругу' : 'Контур обрезан по кругу');
+    logAction('tool', 'Контур объекта вырезан циркулем');
 }
 
 function handleTextClick(e) {
@@ -6007,36 +6132,6 @@ function getDrawLayerOptions() {
     return options;
 }
 
-// Окно выбора культуры (список + «Свои культуры…») доступно для любого типа
-// объекта — и при создании, и при редактировании уже существующей области.
-function updateCreateCropBlockVisibility() {
-    const block = document.getElementById('create-crop-block');
-    if (!block) return;
-    block.style.display = 'block';
-    populateCreateCropSelect();
-    const sel = document.getElementById('create-crop-select');
-    if (sel && !sel._manageBound) {
-        sel._manageBound = true;
-        sel.addEventListener('change', () => {
-            if (sel.value === '__manage__') {
-                sel.value = '';
-                openManageCustomCropsModal();
-                return;
-            }
-            // При создании культура применяется к новому объекту в addCreatedPolygon();
-            // при редактировании уже существующего — применяем сразу же.
-            if (!createSessionActive && selectedFeatures.length === 1) {
-                const { layer, layerId } = selectedFeatures[0];
-                const meta = ensureFieldMeta(layer, layerId);
-                if (sel.value) applyCropToMeta(meta, sel.value);
-                else { meta.confirmedCrop = null; meta.confirmed = false; }
-                renderFieldLabels();
-                renderLayersList(document.getElementById('layer-search')?.value);
-            }
-        });
-    }
-}
-
 function openEditAreaMode() {
     if (selectedFeatures.length !== 1) {
         showToast('Выделите одну область для редактирования (или создайте новую через «Создать область»).', true);
@@ -6049,17 +6144,12 @@ function openEditAreaMode() {
     populateDrawLayerSelect();
     const sel = document.getElementById('draw-layer-select');
     if (sel) sel.value = activeLayerId;
-    updateCreateCropBlockVisibility();
     document.getElementById('edit-area-controls').style.display = 'block';
     const editedLayer = selectedFeatures[0].layer;
     const meta = ensureFieldMeta(editedLayer, activeLayerId);
-    const cropSel = document.getElementById('create-crop-select');
-    if (cropSel) cropSel.value = meta.confirmedCrop || '';
     const objectName = meta?.name;
     const title = document.getElementById('paint-hud-title');
     if (title) title.textContent = objectName ? `Редактирование: «${objectName}»` : 'Редактирование';
-    collapseSegPanel();
-    setMoreMenuOpen(true);
     const eraserBtn = document.getElementById('edit-eraser-btn');
     if (eraserBtn) { eraserBtn.disabled = false; eraserBtn.title = ''; }
     setEditDrawMode('brush');
@@ -6088,7 +6178,6 @@ function finishEditAreaMode() {
     discardCreateDraft();
     stopFreehandEdit();
     document.getElementById('edit-area-controls').style.display = 'none';
-    setMoreMenuOpen(false);
     document.getElementById('map-area')?.classList.remove('tool-eraser', 'tool-brush');
     setTool('select');
     renderFieldLabels();
@@ -6108,7 +6197,6 @@ function startCreateArea() {
     if (sel && preferred) sel.value = preferred;
     draftCreateLayerId = preferred;
     activeLayerId = preferred;
-    updateCreateCropBlockVisibility();
     document.getElementById('edit-area-controls').style.display = 'block';
     const title = document.getElementById('paint-hud-title');
     if (title) title.textContent = 'Создание области';
@@ -6121,8 +6209,6 @@ function startCreateArea() {
         eraserBtn.disabled = true;
         eraserBtn.title = 'Ластик редактирует уже существующий объект — сначала завершите создание';
     }
-    collapseSegPanel();
-    setMoreMenuOpen(true);
     startFreehandEdit('create');
     showToast('Создание: обведите область кистью. Каждый штрих — объект. «Готово» — выход.');
 }
@@ -6153,9 +6239,6 @@ function startFreehandEdit(mode) {
     mapArea?.classList.add('tool-freehand');
     mapArea?.classList.toggle('tool-eraser', editDrawMode === 'eraser');
     mapArea?.classList.toggle('tool-brush', editDrawMode !== 'eraser');
-
-    // меню «Ещё» с настройками кисти остаётся открытым — не пересекается с toolbar
-    setMoreMenuOpen(true);
 
     map.dragging.disable();
     // старый механизм: mousedown на карте, move/up на document
@@ -6251,12 +6334,6 @@ function getBrushSizeMeters() {
     return parseInt(document.getElementById('brush-size')?.value || 20, 10);
 }
 
-function closeToolsMenu() {
-    // не закрываем меню, пока активна кисть/создание — там панель настроек
-    if (activeTool === 'freehand' || createSessionActive) return;
-    setMoreMenuOpen(false);
-}
-
 function setPaintingUi(_active) {
     // no-op: панели остаются на месте (в more-menu), toolbar не трогаем
 }
@@ -6345,6 +6422,45 @@ function polyBoolRegionsToRings(poly, proj) {
         .filter(r => r.length >= 3)
         .sort((a, b) => regionShoelaceArea(b) - regionShoelaceArea(a))
         .map(r => r.map(xy => proj.toLatLng(xy)));
+}
+
+/**
+ * Вычитает cutRegion (PolyBool-регион в локальных XY) из контура layer.
+ * Раньше при стирании ВНУТРИ области (не задевая границу) результат просто
+ * отбрасывался — оставалась только самая крупная часть, а вырезанный внутри
+ * кусок пропадал бесследно, будто стирание не сработало. Теперь отличаем
+ * два случая:
+ *  - кусок оказался ВНУТРИ основного контура (проверка «точка в полигоне»
+ *    по первой вершине) — это настоящая дыра (например, вырезали остров
+ *    посреди поля), оставляем её как внутреннее кольцо полигона;
+ *  - кусок оказался СНАРУЖИ — это разрыв формы на отдельные части (стёрли
+ *    поперёк), тут по-прежнему оставляем только самую крупную часть.
+ * Возвращает null при ошибке PolyBool, либо { finalRings, holesCount,
+ * splitDiscarded, isEmpty } — finalRings уже готов для layer.setLatLngs(...).
+ */
+function applyRingDifference(layer, cutRegion, proj) {
+    let diffed;
+    try {
+        diffed = PolyBool.difference(ringToPolyBoolRegion(getPolygonRing(layer), proj), cutRegion);
+    } catch (e) {
+        console.error('ring difference failed', e);
+        return null;
+    }
+    const rings = polyBoolRegionsToRings(diffed, proj);
+    if (!rings.length) return { finalRings: null, holesCount: 0, splitDiscarded: false, isEmpty: true };
+    const outer = rings[0];
+    const holes = [];
+    let splitDiscarded = false;
+    for (let i = 1; i < rings.length; i++) {
+        if (pointInPolygonRing(rings[i][0], outer)) holes.push(rings[i]);
+        else splitDiscarded = true;
+    }
+    return {
+        finalRings: holes.length ? [outer, ...holes] : outer,
+        holesCount: holes.length,
+        splitDiscarded,
+        isEmpty: false,
+    };
 }
 
 /** Буфер вдоль штриха — объединение перекрывающихся кругов радиуса вдоль пути. Повторяет форму штриха, а не его выпуклую оболочку. */
@@ -6511,24 +6627,24 @@ function applyFreehandStroke() {
             return;
         }
         const before = eraserUndoBefore || JSON.parse(JSON.stringify(layer.getLatLngs()));
-        let diffed;
-        try {
-            diffed = PolyBool.difference(ringToPolyBoolRegion(getPolygonRing(layer), proj), strokeBuf);
-        } catch (e) {
-            console.error('eraser difference failed', e);
+        const result = applyRingDifference(layer, strokeBuf, proj);
+        if (!result) {
             showToast('Не удалось изменить контур — попробуйте провести иначе', true);
             return;
         }
-        const rings = polyBoolRegionsToRings(diffed, proj);
-        if (!rings.length) {
+        if (result.isEmpty) {
             showToast('Ластик стирает контур целиком — удалите объект вручную, если это нужно', true);
             return;
         }
-        layer.setLatLngs(rings[0]);
+        layer.setLatLngs(result.finalRings);
         pushUndo({ type: 'modifyFeature', layer, before, after: layer.getLatLngs() });
         renderFieldLabels();
         showVertexMarkers(layer, selectedFeatures[0]?.layerId || layerId);
-        showToast(rings.length > 1 ? 'Контур скорректирован (оставлена самая крупная часть)' : 'Контур скорректирован');
+        showToast(
+            result.holesCount ? 'В контуре вырезано отверстие'
+                : result.splitDiscarded ? 'Контур скорректирован (оставлена самая крупная часть)'
+                : 'Контур скорректирован'
+        );
         logAction('tool', 'Контур объекта скорректирован ластиком');
         return;
     }
@@ -6573,8 +6689,6 @@ function addCreatedPolygon(ring, entry, layerId) {
         fillOpacity: getFillOpacity(false),
     });
     ensureFieldMeta(poly, layerId);
-    const cropKey = document.getElementById('create-crop-select')?.value;
-    if (cropKey && cropKey !== '__manage__') applyCropToMeta(poly._fieldMeta, cropKey);
     bindFeatureEvents(poly, layerId);
     entry.group.addLayer(poly);
     entry.detected = true;
@@ -6598,10 +6712,8 @@ function startMergePolygonsMode() {
     clearSelection();
     mergeModeActive = true;
     setTool('select');
-    collapseSegPanel();
-    setMoreMenuOpen(true);
     updateMergeModePanel();
-    showToast('Кликните по 2–3 областям одного слоя, затем «Объединить»');
+    showToast('Кликните по 2 областям одного слоя, затем «Объединить»');
 }
 
 function cancelMergeMode() {
@@ -6625,98 +6737,85 @@ function updateMergeModePanel() {
     panel.style.display = mergeModeActive ? 'block' : 'none';
     document.getElementById('merge-menu-item')?.classList.toggle('active', mergeModeActive);
     const hint = document.getElementById('merge-mode-hint');
-    if (hint) hint.textContent = `Выбрано: ${mergeModeActive ? selectedFeatures.length : 0}`;
+    if (hint) hint.textContent = `Выбрано: ${mergeModeActive ? selectedFeatures.length : 0} из 2`;
     const btn = document.getElementById('merge-confirm-btn');
     if (btn) btn.disabled = selectedFeatures.length < 2;
 }
 
-/** Клик по области в режиме объединения — добавляет/убирает её из набора
- * (третий клик по уже выбранной области снимает с неё выделение). */
+/** Клик по области в режиме объединения — добавляет/убирает её из набора.
+ * Одновременно можно выбрать не больше двух областей: после объединения
+ * результат можно так же выбрать и объединить со следующей. */
 function toggleMergeSelection(layer, layerId) {
     const idx = selectedFeatures.findIndex(s => s.layer === layer);
     if (idx >= 0) {
-        layer.setStyle(getFeatureBaseStyle(layerId, layer));
+        resetFeatureStyle(layer, layerId);
         selectedFeatures.splice(idx, 1);
     } else {
+        if (selectedFeatures.length >= 2) {
+            showToast('За раз можно объединить только 2 области — сначала снимите одну', true);
+            return;
+        }
         if (selectedFeatures.length && selectedFeatures[0].layerId !== layerId) {
             showToast('Объединять можно только области одного слоя', true);
             return;
         }
         selectedFeatures.push({ layer, layerId });
-        const base = getFeatureBaseStyle(layerId, layer);
-        const fill = Math.min(0.85, (base.fillOpacity || 0.35) + 0.2);
-        layer.setStyle({ ...base, weight: base.weight + 3, color: '#ffffff', fillOpacity: fill });
-        if (layer.bringToFront) layer.bringToFront();
+        applySelectedFeatureStyle(layer, layerId);
     }
     syncSidebarSelectionHighlight();
     updateMergeModePanel();
 }
 
 function confirmMergePolygons() {
-    if (selectedFeatures.length < 2) return;
+    if (selectedFeatures.length !== 2) return;
     mergeSelectedPolygons(selectedFeatures);
-    mergeModeActive = false;
-    updateMergeModePanel();
 }
 
-function mergeSelectedPolygons(features) {
-    const layerId = features[0].layerId;
-    const entry = findLayerEntry(layerId);
-    if (!entry) return;
-    const toRemove = features.map(f => f.layer).filter(l => l && l.getLatLngs);
-    if (toRemove.length < 2) return;
+function distSqXY(a, b) {
+    const dx = a[0] - b[0], dy = a[1] - b[1];
+    return dx * dx + dy * dy;
+}
 
-    // Точное объединение (PolyBool) — если области соприкасаются/пересекаются,
-    // сохраняет их реальные вогнутые контуры, не «раздувая» форму зря.
-    const proj = makeLocalProjection(getPolygonRing(toRemove[0])[0]);
-    let unioned = ringToPolyBoolRegion(getPolygonRing(toRemove[0]), proj);
-    try {
-        for (let i = 1; i < toRemove.length; i++) {
-            unioned = PolyBool.union(unioned, ringToPolyBoolRegion(getPolygonRing(toRemove[i]), proj));
+function closestPointOnSegmentXY(p, a, b) {
+    const abx = b[0] - a[0], aby = b[1] - a[1];
+    const lenSq = abx * abx + aby * aby;
+    let t = lenSq > 1e-12 ? ((p[0] - a[0]) * abx + (p[1] - a[1]) * aby) / lenSq : 0;
+    t = Math.max(0, Math.min(1, t));
+    return [a[0] + abx * t, a[1] + aby * t];
+}
+
+/**
+ * Пара рёбер (одно из ringA, одно из ringB) с минимальным расстоянием между
+ * ними — то есть реально ближайшие друг к другу «обращённые» стороны двух
+ * контуров, а не любые их вершины. Возвращает также САМИ ближайшие точки
+ * (closestPointA/B) и точное расстояние между ними (gapDist) — не путать с
+ * расстоянием между СЕРЕДИНАМИ выбранных рёбер: если рёбра почти
+ * параллельны и сближаются только одним концом (частый случай), середины
+ * могут оказаться в разы дальше друг от друга, чем истинный зазор.
+ */
+function closestEdgePairXY(ringA, ringB) {
+    let best = null, bestD = Infinity, bestPA = null, bestPB = null;
+    for (let i = 0; i < ringA.length; i++) {
+        const a1 = ringA[i], a2 = ringA[(i + 1) % ringA.length];
+        for (let j = 0; j < ringB.length; j++) {
+            const b1 = ringB[j], b2 = ringB[(j + 1) % ringB.length];
+            const candidates = [
+                [a1, closestPointOnSegmentXY(a1, b1, b2)],
+                [a2, closestPointOnSegmentXY(a2, b1, b2)],
+                [closestPointOnSegmentXY(b1, a1, a2), b1],
+                [closestPointOnSegmentXY(b2, a1, a2), b2],
+            ];
+            for (const [pa, pb] of candidates) {
+                const d = distSqXY(pa, pb);
+                if (d < bestD) { bestD = d; best = { a1, a2, b1, b2 }; bestPA = pa; bestPB = pb; }
+            }
         }
-    } catch (e) {
-        console.error('merge union failed', e);
-        showToast('Не удалось объединить полигоны', true);
-        return;
     }
-    const rings = polyBoolRegionsToRings(unioned, proj);
-    if (!rings.length) return;
-
-    // Части не соприкасались (результат распался на несколько кусков) — поля
-    // должны СОЕДИНИТЬСЯ в одно, а не потерять меньшую часть: заполняем
-    // пространство между ними выпуклой оболочкой по всем исходным точкам.
-    let finalRing;
-    let bridged = false;
-    if (rings.length > 1) {
-        const allPointsXY = toRemove.flatMap(l => getPolygonRing(l).map(p => proj.toXY(p)));
-        const hullXY = convexHullXY(allPointsXY);
-        finalRing = hullXY.map(xy => proj.toLatLng(xy));
-        bridged = true;
-    } else {
-        finalRing = rings[0];
-    }
-
-    const removedMeta = toRemove.map(layer => ({ layer, meta: layer._fieldMeta ? { ...layer._fieldMeta } : null }));
-    toRemove.forEach(l => entry.group.removeLayer(l));
-    const merged = L.polygon(finalRing, { color: entry.color, weight: displaySettings.lineWidth, fillColor: entry.color, fillOpacity: getFillOpacity(false) });
-    ensureFieldMeta(merged, layerId);
-    bindFeatureEvents(merged, layerId);
-    entry.group.addLayer(merged);
-    pushUndo({ type: 'mergePolygons', layerId, removed: removedMeta, merged });
-    clearSelection();
-    hideFieldDetail();
-    selectFeature(merged, layerId, false);
-    showFieldDetail(merged, layerId);
-    renderLayersList(document.getElementById('layer-search')?.value);
-    renderLegend();
-    renderFieldLabels();
-    showToast(bridged ? 'Объединено — пространство между областями заполнено' : 'Выделенные полигоны объединены');
-    logAction('tool', 'Объединены выделенные полигоны');
+    if (!best) return null;
+    return { ...best, closestPointA: bestPA, closestPointB: bestPB, gapDist: Math.sqrt(bestD) };
 }
 
-/** Выпуклая оболочка набора точек (алгоритм Эндрю, монотонная цепочка) —
- * нужна только чтобы соединить НЕ соприкасающиеся при объединении полигоны
- * в одну сплошную область без разрыва между ними. */
+/** Выпуклая оболочка набора точек (алгоритм Эндрю, монотонная цепочка). */
 function convexHullXY(points) {
     const pts = [...new Map(points.map(p => [`${p[0]},${p[1]}`, p])).values()]
         .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
@@ -6733,14 +6832,142 @@ function convexHullXY(points) {
         while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
         upper.push(p);
     }
-    upper.pop();
-    lower.pop();
+    upper.pop(); lower.pop();
     return lower.concat(upper);
+}
+
+/**
+ * Мост между двумя несоприкасающимися контурами — не узкая перемычка между
+ * единственной парой ближайших рёбер (получалась слишком тонкая «шея»,
+ * непохоже на реальное объединение полей) и не выпуклая оболочка ВСЕХ точек
+ * обеих фигур (раздувает форму далеко за пределы настоящих границ). Вместо
+ * этого берём точки каждого контура, лежащие РЯДОМ с местом сближения (окно
+ * тем шире, чем шире сам зазор), и строим выпуклую оболочку только по ним —
+ * мост получается такой же ширины, как обращённые друг к другу стороны
+ * полей, и не трогает их дальние края.
+ */
+function buildLocalBridgeHullXY(ringA, ringB) {
+    const closest = closestEdgePairXY(ringA, ringB);
+    if (!closest) return null;
+    const { a1, a2, b1, b2, closestPointA, closestPointB, gapDist } = closest;
+    // Окно захвата — от РЕАЛЬНОГО зазора (не от середин рёбер, которые могут
+    // быть далеко друг от друга даже у самых близких рёбер), с достаточным
+    // запасом, чтобы мост получился не уже, чем сами обращённые друг к другу
+    // стороны полей, но не настолько большим, чтобы захватить весь контур.
+    const radius = Math.max(gapDist * 4, 40);
+    const radiusSq = radius * radius;
+    let localA = ringA.filter(p => distSqXY(p, closestPointB) <= radiusSq);
+    let localB = ringB.filter(p => distSqXY(p, closestPointA) <= radiusSq);
+    if (localA.length < 2) localA = [a1, a2];
+    if (localB.length < 2) localB = [b1, b2];
+    return convexHullXY([...localA, ...localB]);
+}
+
+function mergeSelectedPolygons(features) {
+    const layerId = features[0].layerId;
+    const entry = findLayerEntry(layerId);
+    if (!entry) return;
+    const toRemove = features.map(f => f.layer).filter(l => l && l.getLatLngs);
+    // Ровно две области за раз — соединять больше сразу нельзя; уже
+    // объединённую область можно выбрать снова и объединить со следующей.
+    if (toRemove.length !== 2) return;
+
+    const proj = makeLocalProjection(getPolygonRing(toRemove[0])[0]);
+    const ringA = getPolygonRing(toRemove[0]);
+    const ringB = getPolygonRing(toRemove[1]);
+    const ringAXY = ringA.map(p => proj.toXY(p));
+    const ringBXY = ringB.map(p => proj.toXY(p));
+
+    // Точное объединение (PolyBool) — если области соприкасаются/пересекаются,
+    // сохраняет их реальные вогнутые контуры, не «раздувая» форму зря.
+    let unioned;
+    try {
+        unioned = PolyBool.union(ringToPolyBoolRegion(ringA, proj), ringToPolyBoolRegion(ringB, proj));
+    } catch (e) {
+        console.error('merge union failed', e);
+        showToast('Не удалось объединить полигоны', true);
+        return;
+    }
+    let rings = polyBoolRegionsToRings(unioned, proj);
+    if (!rings.length) return;
+
+    // Части не соприкасались (результат распался на несколько кусков) — поля
+    // должны СОЕДИНИТЬСЯ в одно: заполняем пространство между ними мостом
+    // по ширине обращённых друг к другу сторон, а не тонкой перемычкой и не
+    // выпуклой оболочкой всех точек.
+    let bridged = false;
+    if (rings.length > 1) {
+        const hullXY = buildLocalBridgeHullXY(ringAXY, ringBXY);
+        if (hullXY && hullXY.length >= 3) {
+            const bridgeLatLng = hullXY.map(xy => proj.toLatLng(xy));
+            try {
+                unioned = PolyBool.union(unioned, ringToPolyBoolRegion(bridgeLatLng, proj));
+                const bridgedRings = polyBoolRegionsToRings(unioned, proj);
+                if (bridgedRings.length) { rings = bridgedRings; bridged = true; }
+            } catch (e) {
+                console.error('bridge union failed', e);
+            }
+        }
+    }
+    if (!rings.length) return;
+
+    // На редкий случай, если даже после моста осталось несколько кусков —
+    // берём крупнейший, чтобы не потерять область целиком.
+    const finalRing = rings.length > 1
+        ? rings.reduce((best, r) => (L.GeometryUtil.geodesicArea(r) > L.GeometryUtil.geodesicArea(best) ? r : best))
+        : rings[0];
+
+    const removedMeta = toRemove.map(layer => ({ layer, meta: layer._fieldMeta ? { ...layer._fieldMeta } : null }));
+    toRemove.forEach(l => entry.group.removeLayer(l));
+    const merged = L.polygon(finalRing, { color: entry.color, weight: displaySettings.lineWidth, fillColor: entry.color, fillOpacity: getFillOpacity(false) });
+    ensureFieldMeta(merged, layerId);
+    bindFeatureEvents(merged, layerId);
+    entry.group.addLayer(merged);
+    pushUndo({ type: 'mergePolygons', layerId, removed: removedMeta, merged });
+    clearSelection();
+    hideFieldDetail();
+    renderLayersList(document.getElementById('layer-search')?.value);
+    renderLegend();
+    renderFieldLabels();
+    showToast(bridged ? 'Объединено — пространство между областями заполнено' : 'Выделенные полигоны объединены');
+    logAction('tool', 'Объединены выделенные полигоны');
+
+    if (mergeModeActive) {
+        // Результат сразу становится первым из следующей пары — можно тут же
+        // выбрать соседнюю область и объединить снова, без выхода из режима.
+        selectedFeatures = [{ layer: merged, layerId }];
+        applySelectedFeatureStyle(merged, layerId);
+        syncSidebarSelectionHighlight();
+        updateMergeModePanel();
+        showToast('Выберите следующую область, чтобы объединить с ней');
+    } else {
+        selectFeature(merged, layerId, false);
+        showFieldDetail(merged, layerId);
+    }
 }
 
 /* --- Меню "Ещё" --- */
 /** Единая точка открытия/закрытия карточки «Ещё» — держит саму панель
  * и кнопку-триггер (иконку с тремя точками) в согласованном состоянии. */
+/**
+ * Ставит окно «Ещё» точно рядом с кнопками инструментов по их реальным
+ * координатам на экране (getBoundingClientRect), а не через CSS calc(100vw…)
+ * от соседнего узкого элемента — тот на некоторых масштабах/разрешениях
+ * давал неверную ширину и обрезал панель за правым краем окна. Так окно
+ * гарантированно не вылезает ни за правый, ни за нижний край экрана.
+ */
+function positionMoreMenu() {
+    const menu = document.getElementById('more-menu');
+    const toolbar = document.getElementById('map-toolbar');
+    if (!menu || !toolbar) return;
+    const tRect = toolbar.getBoundingClientRect();
+    const top = Math.max(8, Math.min(tRect.top, window.innerHeight - 60));
+    const right = Math.max(8, window.innerWidth - tRect.left + 8);
+    menu.style.top = top + 'px';
+    menu.style.right = right + 'px';
+    menu.style.maxHeight = Math.max(160, window.innerHeight - top - 12) + 'px';
+}
+
 function setMoreMenuOpen(open) {
     const menu = document.getElementById('more-menu');
     menu?.classList.toggle('active', open);
@@ -6748,6 +6975,7 @@ function setMoreMenuOpen(open) {
         // Каждое открытие — с чистого листа: развёрнуто, а не в последнем свёрнутом виде.
         menu.classList.remove('collapsed');
         document.getElementById('more-menu-toggle')?.setAttribute('aria-expanded', 'true');
+        positionMoreMenu();
     }
     const btn = document.getElementById('tool-more-btn');
     if (btn) {
@@ -6755,6 +6983,10 @@ function setMoreMenuOpen(open) {
         btn.setAttribute('aria-expanded', open ? 'true' : 'false');
     }
 }
+
+window.addEventListener('resize', () => {
+    if (document.getElementById('more-menu')?.classList.contains('active')) positionMoreMenu();
+});
 
 function toggleMoreMenu(event) {
     if (event) event.stopPropagation();
@@ -6769,16 +7001,6 @@ function toggleSegPanel() {
     if (!card) return;
     const collapsed = card.classList.toggle('collapsed');
     if (toggle) toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-}
-
-/** Сворачивает карточку «Сегментация», если она открыта — освобождает место
- * карточке инструментов при входе в рисование/редактирование (это разные
- * режимы работы, одновременно раскрытыми обе карточки быть не обязаны). */
-function collapseSegPanel() {
-    const card = document.getElementById('map-seg-panel');
-    if (!card || card.classList.contains('collapsed')) return;
-    card.classList.add('collapsed');
-    document.getElementById('seg-panel-toggle')?.setAttribute('aria-expanded', 'false');
 }
 
 /** Сворачивает/разворачивает всё окно «Ещё» целиком (список действий + панель
@@ -6922,17 +7144,6 @@ function populateDrawLayerSelect() {
     if (preferred) sel.value = preferred;
 }
 
-function populateCreateCropSelect() {
-    const sel = document.getElementById('create-crop-select');
-    if (!sel) return;
-    const prev = sel.value;
-    const options = getAllCropOptions();
-    sel.innerHTML = '<option value="">— Выберите культуру —</option>' +
-        options.map(o => `<option value="${o.key}">${formatCropOptionLabel(o.key, o.label, o.custom)}</option>`).join('') +
-        '<option value="__manage__">⚙ Свои культуры…</option>';
-    if (prev && prev !== '__manage__' && [...sel.options].some(o => o.value === prev)) sel.value = prev;
-}
-
 function openManageCustomCropsModal() {
     openAppModal({
         title: 'Свои культуры',
@@ -6940,7 +7151,7 @@ function openManageCustomCropsModal() {
         actions: [
             { label: 'Готово', className: 'mini-btn mini-btn-red', onClick: () => {
                 closeAppModal();
-                populateCreateCropSelect();
+                populateFieldCropSelect(selectedFieldLayer?._fieldMeta?.confirmedCrop);
             }},
         ],
     });
@@ -6971,7 +7182,6 @@ function onDrawLayerSelect(val) {
         if (entry && draftCreatePolygon) {
             draftCreatePolygon.setStyle({ color: entry.color, fillColor: entry.color });
         }
-        updateCreateCropBlockVisibility();
         selectLayerAsActive(val);
         return;
     }
@@ -6981,15 +7191,11 @@ function onDrawLayerSelect(val) {
         populateDrawLayerSelect();
         const sel = document.getElementById('draw-layer-select');
         if (sel) sel.value = val;
-        updateCreateCropBlockVisibility();
-        const cropSel = document.getElementById('create-crop-select');
-        if (cropSel) cropSel.value = selectedFeatures[0]?.layer?._fieldMeta?.confirmedCrop || '';
         return;
     }
 
     activeLayerId = val;
     selectLayerAsActive(val);
-    updateCreateCropBlockVisibility();
 }
 
 function setMapDisplayOption(key, value) {

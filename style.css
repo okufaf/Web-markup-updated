@@ -219,7 +219,18 @@ body {
     height: 56px; background: linear-gradient(90deg, var(--navy), var(--bg-dark)); display: flex; justify-content: space-between;
     align-items: center; padding: 0 1.5rem; color: var(--text-light); flex-shrink: 0;
 }
-.topbar-left, .topbar-right { display: flex; align-items: center; gap: 1.5rem; }
+.topbar-left, .topbar-right { display: flex; align-items: center; gap: 1.5rem; min-width: 0; }
+/* Название организации может быть длинным — на узком окне оно должно
+   обрезаться многоточием, а не раздвигать шапку (и с ней всю страницу)
+   шире экрана: та же причина, по которой панель инструментов на карте
+   иначе оказывалась частично за пределами видимой области окна. */
+.topbar-right .company-name {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    min-width: 0; flex-shrink: 1;
+}
+.topbar-right .status-pills, .topbar-right .topbar-logout, .topbar-left .brand-name {
+    flex-shrink: 0;
+}
 .logo-mini-img { width: 26px; height: 26px; border-radius: 6px; object-fit: cover; }
 .brand-name { font-family: var(--font-brand); font-weight: 700; font-size: 1.55rem; letter-spacing: 1px; }
 .brand-name2 { font-size: 1.05rem;  }
@@ -284,6 +295,16 @@ body {
     cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32'%3E%3Crect x='6' y='12' width='18' height='12' rx='2' transform='rotate(-35 15 18)' fill='%23f8fafc' stroke='%23010635' stroke-width='1.8'/%3E%3Crect x='6' y='18' width='18' height='6' rx='1' transform='rotate(-35 15 21)' fill='%23010635' opacity='0.9'/%3E%3C/svg%3E") 8 24, cell;
 }
 .map-area.tool-freehand #map { cursor: crosshair; }
+/* Подписи объектов и координатные тултипы не кликабельны (pointer-events: none) —
+   их собственный cursor визуально никогда не используется. Но т.к. cursor —
+   наследуемое свойство, без этой статичной «заглушки» браузер при каждой смене
+   инструмента пересчитывает cursor для ВСЕХ подписей на карте (после долгой
+   работы их могут быть тысячи) — это и вызывало заметное подтормаживание при
+   выборе инструмента. Явное, никогда не меняющееся значение останавливает
+   каскад пересчёта на уровне пана, не доходя до каждой подписи по отдельности. */
+#map .leaflet-marker-pane, #map .leaflet-tooltip-pane, #map .leaflet-popup-pane {
+    cursor: default !important;
+}
 
 .view-container { display: none; height: calc(100vh - 56px); }
 .view-container.active { display: flex; }
@@ -559,7 +580,6 @@ body {
 .modal-text { margin: 0; font-size: var(--fs-base); color: #475569; line-height: 1.45; }
 .avatar-hint { font-size: var(--fs-sm); color: #94a3b8; margin: 10px 0 0; }
 .edit-hint { font-size: var(--fs-xs); color: #94a3b8; margin: 0 0 8px; line-height: 1.35; }
-.field-crop-result.muted { color: #94a3b8; background: #f8fafc; }
 .field-item { display: flex; align-items: center; gap: 6px; font-size: var(--fs-sm); padding: 3px 6px 3px 12px; border-radius: 4px; cursor: pointer; color: #475569; margin-bottom: 2px; justify-content: space-between; }
 .field-item-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .field-item .layer-action { padding: 2px 5px; font-size: 11px; opacity: 0.7; }
@@ -606,8 +626,6 @@ span.color-box { display: inline-block; border: 1.5px solid #e2e8f0; }
 .history-actions { display: flex; gap: 10px; margin-top: 4px; flex-wrap: wrap; }
 .history-download, .history-open { font-size: var(--fs-xs); color: var(--accent-red); background: none; border: none; cursor: pointer; padding: 0; font-family: var(--font-main); }
 .history-download:hover, .history-open:hover { text-decoration: underline; }
-.create-crop-block { margin-bottom: 8px; }
-.create-crop-block .settings-block-title { margin-bottom: 4px; }
 
 .import-btn { display: block; width: 100%; padding: 8px 12px; border-radius: 6px; border: 1px dashed var(--border-color); text-align: center; font-size: var(--fs-sm); color: #64748b; cursor: pointer; }
 .import-btn:hover { border-color: var(--accent-red); color: var(--accent-red); }
@@ -832,7 +850,6 @@ span.color-box { display: inline-block; border: 1.5px solid #e2e8f0; }
 }
 .field-map-label strong { display: block; font-size: 12px; }
 .field-area { font-size: var(--fs-sm); color: #475569; margin-bottom: 10px; }
-.field-crop-result { font-size: var(--fs-sm); margin-bottom: 8px; padding: 8px; background: #fff; border-radius: 6px; border: 1px solid #e2e8f0; }
 .field-actions { display: flex; gap: 8px; }
 .field-actions .mini-btn { flex: 1; margin-bottom: 0; }
 
@@ -864,7 +881,12 @@ span.color-box { display: inline-block; border: 1.5px solid #e2e8f0; }
 /* =========================================================
    ВКЛАДКА КАРТА — область карты и панель инструментов
    ========================================================= */
-.map-area { flex: 1; position: relative; display: flex; flex-direction: column; }
+/* min-width:0 — без этого флекс-элемент не сжимается меньше «естественной»
+   ширины своего содержимого: на узком окне вся страница расползалась шире
+   экрана вместо того, чтобы карта ужалась, из-за чего панель инструментов
+   (привязанная к правому краю карты) оказывалась частично за пределами
+   видимой области окна. */
+.map-area { flex: 1; min-width: 0; position: relative; display: flex; flex-direction: column; }
 #map { flex: 1; width: 100%; background: #e2e8f0; }
 
 /* Под скрин: белая карта-панель слева + лёгкий бордер */
@@ -925,17 +947,22 @@ span.color-box { display: inline-block; border: 1.5px solid #e2e8f0; }
    когда активна) можно свернуть в одну строку, не закрывая его совсем. */
 .more-menu {
     display: none;
-    position: absolute;
-    top: 0;
-    right: calc(100% + 8px);
-    left: auto;
-    transform: none;
+    /* position:fixed и точные top/right в пикселях выставляет JS
+       (positionMoreMenu) по реальному положению кнопок инструментов —
+       не полагаемся на calc(100vw...) от узкого соседнего элемента, который
+       на некоторых экранах/масштабах даёт неверную ширину и обрезает панель
+       за правым краем окна. Значения ниже — только безопасный запасной
+       вариант на случай, если JS ещё не отработал. */
+    position: fixed;
+    top: 12px;
+    right: 12px;
     background: #fff;
     border-radius: 10px;
     box-shadow: 0 6px 16px rgba(0,0,0,0.15);
     z-index: 1500;
-    width: min(280px, calc(100vw - 120px));
-    max-height: min(420px, calc(100vh - 200px));
+    width: min(280px, calc(100vw - 24px));
+    max-width: calc(100vw - 24px);
+    max-height: min(420px, calc(100vh - 24px));
     overflow: hidden;
 }
 .more-menu.active { display: block; }
@@ -1293,6 +1320,14 @@ span.color-box { display: inline-block; border: 1.5px solid #e2e8f0; }
     background: var(--bg-dark); color: #fff; font-size: var(--fs-xs); padding: 3px 8px;
     border-radius: 4px; white-space: nowrap; font-family: var(--font-main);
 }
+
+/* Мини-панель действий у круга циркуля — «область» или «вырезать по кругу» */
+.compass-popup .leaflet-popup-content-wrapper { border-radius: 10px; }
+.compass-popup .leaflet-popup-content { margin: 10px 12px; }
+.compass-action-popup { display: flex; flex-direction: column; gap: 6px; min-width: 170px; }
+.compass-action-title { font-size: var(--fs-xs); font-weight: 700; color: #64748b; letter-spacing: 0.5px; margin-bottom: 2px; }
+.compass-action-popup .mini-btn { margin-bottom: 0; width: 100%; }
+.compass-action-popup .mini-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* =========================================================
    ВКЛАДКА АККАУНТ
