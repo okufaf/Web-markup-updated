@@ -1535,8 +1535,14 @@ async function handleRegister(event) {
     return false;
 }
 
-async function handleLogout() {
-    if (!confirm('Выйти из аккаунта?')) return;
+function handleLogout() {
+    // Нативный confirm() здесь раньше не давал выйти вообще — в этом
+    // окружении браузера он ненадёжен (та же причина, по которой удаление
+    // слоёв/папок/объектов уже переведено на confirmModal() приложения).
+    confirmModal('Выйти из аккаунта?', performLogout, { title: 'Выход', confirmLabel: 'Выйти', cancelLabel: 'Отмена' });
+}
+
+async function performLogout() {
     logAction('account', 'Выход из системы');
     try {
         if (authMode === 'server') await apiFetch('/api/logout', { method: 'POST' });
