@@ -3956,6 +3956,14 @@ function initMap() {
     initSidebarResize();
     initNetworkStatus();
     populateDrawLayerSelect();
+    // Плавающие панели поверх карты («Инструменты», «Сегментация») лежат в
+    // зоне, где Leaflet по умолчанию перехватывает колесо мыши под свой зум —
+    // без этого прокрутка длинного содержимого панели (например, «Толщина» +
+    // «Готово» в режиме кисти/ластика) не работала: колесо крутило/пыталось
+    // крутить карту вместо самой панели, и до конца списка было не долистать.
+    [document.getElementById('more-menu'), document.getElementById('map-seg-panel')].forEach(el => {
+        if (el) L.DomEvent.disableScrollPropagation(el);
+    });
 
     document.addEventListener('click', (e) => {
         // во время freehand панель кисти внутри more-menu — не закрывать
@@ -6154,6 +6162,7 @@ function openEditAreaMode() {
     if (eraserBtn) { eraserBtn.disabled = false; eraserBtn.title = ''; }
     setEditDrawMode('brush');
     showToast('Редактирование: кисть расширяет, ластик подрезает край. «Готово» — выход.');
+    repositionMoreMenuIfOpen();
 }
 
 function setEditDrawMode(mode) {
@@ -6181,6 +6190,7 @@ function finishEditAreaMode() {
     document.getElementById('map-area')?.classList.remove('tool-eraser', 'tool-brush');
     setTool('select');
     renderFieldLabels();
+    repositionMoreMenuIfOpen();
 }
 
 function startCreateArea() {
@@ -6211,6 +6221,7 @@ function startCreateArea() {
     }
     startFreehandEdit('create');
     showToast('Создание: обведите область кистью. Каждый штрих — объект. «Готово» — выход.');
+    repositionMoreMenuIfOpen();
 }
 
 function discardCreateDraft() {
@@ -6406,6 +6417,30 @@ function ringToPolyBoolRegion(ring, proj) {
     return { regions: [pts.map(p => proj.toXY(p))], inverted: false };
 }
 
+/**
+ * PolyBool-регион текущей формы слоя — С УЧЁТОМ уже существующих дыр
+ * (вырезанных ранее ластиком/циркулем), а не только внешней границы.
+ * getPolygonRing() намеренно отдаёт только внешнее кольцо (это ок для
+ * рисования/объединения «на глаз»), но для СЛЕДУЮЩЕЙ операции вычитания
+ * или расширения контура этого недостаточно: если считать только от внешней
+ * границы, предыдущая дыра при пересборке latlngs потеряется — та область,
+ * что стёрли раньше, «вернётся» обратно. Здесь сначала вычитаем из внешнего
+ * кольца все существующие дыры, и только после этого — новый вырезаемый/
+ * добавляемый кусок.
+ */
+function layerToPolyBoolRegion(layer, proj) {
+    const latlngs = layer.getLatLngs();
+    const rings = Array.isArray(latlngs[0]) ? latlngs : [latlngs];
+    let region = ringToPolyBoolRegion(rings[0], proj);
+    for (let i = 1; i < rings.length; i++) {
+        if (rings[i].length < 3) continue;
+        try {
+            region = PolyBool.difference(region, ringToPolyBoolRegion(rings[i], proj));
+        } catch (e) { /* повреждённую дыру пропускаем, не роняем всю операцию */ }
+    }
+    return region;
+}
+
 function regionShoelaceArea(region) {
     let sum = 0;
     for (let i = 0; i < region.length; i++) {
@@ -6441,7 +6476,7 @@ function polyBoolRegionsToRings(poly, proj) {
 function applyRingDifference(layer, cutRegion, proj) {
     let diffed;
     try {
-        diffed = PolyBool.difference(ringToPolyBoolRegion(getPolygonRing(layer), proj), cutRegion);
+        diffed = PolyBool.difference(layerToPolyBoolRegion(layer, proj), cutRegion);
     } catch (e) {
         console.error('ring difference failed', e);
         return null;
@@ -6582,7 +6617,11 @@ function updateFreehandPreview() {
  *    полигон прямо по обведённой линии, середина заполняется целиком;
  *  - create, короткий незамкнутый мазок — буфер штриха (полоса вдоль линии);
  *  - brush: существующий объект = union(объект, буфер штриха);
- *  - eraser: существующий объект = difference(объект, буфер штриха).
+ *  - eraser, контур замкнут — вычитается вся обведённая область целиком
+ *    (плюс буфер по толщине кисти вдоль самой линии, для мягкого края), а не
+ *    только тонкая полоса по линии — иначе стирание «кругом» внутри объекта
+ *    не трогало бы середину этого круга;
+ *  - eraser, незамкнутый мазок (обрезка от края) — буфер штриха.
  */
 function applyFreehandStroke() {
     if (freehandPath.length < 2) return;
@@ -6626,8 +6665,24 @@ function applyFreehandStroke() {
             showToast('Выделите один объект — ластик работает только с ним', true);
             return;
         }
+        // Если обвели контур замкнутой линией (как лассо) — стираем ВСЮ
+        // область внутри обведённого, а не только тонкую полосу вдоль самой
+        // линии. Раньше ластик всегда вырезал только буфер по толщине кисти
+        // вдоль штриха: обведя круг внутри поля, середина круга оставалась
+        // нетронутой — стиралось лишь кольцо по нарисованной линии.
+        let cutRegion = strokeBuf;
+        if (freehandPath.length >= 3) {
+            const closeDistM = freehandPath[0].distanceTo(freehandPath[freehandPath.length - 1]);
+            if (closeDistM <= Math.max(radius * 1.5, 10)) {
+                try {
+                    const loopRegion = { regions: [freehandPath.map(p => proj.toXY(p))], inverted: false };
+                    const loopFilled = PolyBool.union(loopRegion, { regions: [], inverted: false });
+                    cutRegion = PolyBool.union(loopFilled, strokeBuf);
+                } catch (e) { /* используем только буфер вдоль линии */ }
+            }
+        }
         const before = eraserUndoBefore || JSON.parse(JSON.stringify(layer.getLatLngs()));
-        const result = applyRingDifference(layer, strokeBuf, proj);
+        const result = applyRingDifference(layer, cutRegion, proj);
         if (!result) {
             showToast('Не удалось изменить контур — попробуйте провести иначе', true);
             return;
@@ -6655,7 +6710,7 @@ function applyFreehandStroke() {
         const before = eraserUndoBefore || JSON.parse(JSON.stringify(sel.getLatLngs()));
         let unioned;
         try {
-            unioned = PolyBool.union(ringToPolyBoolRegion(getPolygonRing(sel), proj), strokeBuf);
+            unioned = PolyBool.union(layerToPolyBoolRegion(sel, proj), strokeBuf);
         } catch (e) {
             console.error('brush union failed', e);
             showToast('Не удалось расширить область — попробуйте провести иначе', true);
@@ -6663,7 +6718,11 @@ function applyFreehandStroke() {
         }
         const rings = polyBoolRegionsToRings(unioned, proj);
         if (!rings.length) return;
-        sel.setLatLngs(rings[0]);
+        // Существующие дыры (вырезанные ранее ластиком/циркулем) сохраняем —
+        // расширение внешней границы кистью не должно их случайно стирать.
+        const outer = rings[0];
+        const holes = rings.slice(1).filter(r => pointInPolygonRing(r[0], outer));
+        sel.setLatLngs(holes.length ? [outer, ...holes] : outer);
         pushUndo({ type: 'modifyFeature', layer: sel, before, after: sel.getLatLngs() });
         renderFieldLabels();
         showVertexMarkers(sel, selectedFeatures[0].layerId);
@@ -6714,6 +6773,7 @@ function startMergePolygonsMode() {
     setTool('select');
     updateMergeModePanel();
     showToast('Кликните по 2 областям одного слоя, затем «Объединить»');
+    repositionMoreMenuIfOpen();
 }
 
 function cancelMergeMode() {
@@ -6721,6 +6781,7 @@ function cancelMergeMode() {
     mergeModeActive = false;
     clearSelection();
     updateMergeModePanel();
+    repositionMoreMenuIfOpen();
 }
 
 /** Выключает режим объединения, не трогая текущее выделение — для перехода
@@ -6879,10 +6940,12 @@ function mergeSelectedPolygons(features) {
     const ringBXY = ringB.map(p => proj.toXY(p));
 
     // Точное объединение (PolyBool) — если области соприкасаются/пересекаются,
-    // сохраняет их реальные вогнутые контуры, не «раздувая» форму зря.
+    // сохраняет их реальные вогнутые контуры, не «раздувая» форму зря. Берём
+    // регион С УЧЁТОМ уже вырезанных дыр в каждой из областей — иначе после
+    // объединения дыры, сделанные ранее ластиком/циркулем, бесследно исчезли бы.
     let unioned;
     try {
-        unioned = PolyBool.union(ringToPolyBoolRegion(ringA, proj), ringToPolyBoolRegion(ringB, proj));
+        unioned = PolyBool.union(layerToPolyBoolRegion(toRemove[0], proj), layerToPolyBoolRegion(toRemove[1], proj));
     } catch (e) {
         console.error('merge union failed', e);
         showToast('Не удалось объединить полигоны', true);
@@ -6911,11 +6974,15 @@ function mergeSelectedPolygons(features) {
     }
     if (!rings.length) return;
 
-    // На редкий случай, если даже после моста осталось несколько кусков —
-    // берём крупнейший, чтобы не потерять область целиком.
-    const finalRing = rings.length > 1
+    // Крупнейшее кольцо — внешняя граница результата. Остальные, что лежат
+    // ВНУТРИ неё — настоящие дыры (в т.ч. уже существовавшие в исходных
+    // областях), сохраняем их. То, что осталось СНАРУЖИ — редкий случай
+    // разрыва формы, такие куски отбрасываем, чтобы не потерять область целиком.
+    const outerRing = rings.length > 1
         ? rings.reduce((best, r) => (L.GeometryUtil.geodesicArea(r) > L.GeometryUtil.geodesicArea(best) ? r : best))
         : rings[0];
+    const holeRings = rings.filter(r => r !== outerRing && pointInPolygonRing(r[0], outerRing));
+    const finalRing = holeRings.length ? [outerRing, ...holeRings] : outerRing;
 
     const removedMeta = toRemove.map(layer => ({ layer, meta: layer._fieldMeta ? { ...layer._fieldMeta } : null }));
     toRemove.forEach(l => entry.group.removeLayer(l));
@@ -6961,11 +7028,33 @@ function positionMoreMenu() {
     const toolbar = document.getElementById('map-toolbar');
     if (!menu || !toolbar) return;
     const tRect = toolbar.getBoundingClientRect();
+    // Всегда под кнопками инструментов (там же, где и раньше) — никогда не
+    // наезжаем на «Сегментацию» сверху, даже если она развёрнута и толкает
+    // кнопки вниз. Если места до низа экрана после этого остаётся мало —
+    // не двигаем панель, а даём ей прокрутку внутри (см. ниже) до самого
+    // низа списка, включая «Толщина»/«Готово» в режиме кисти-ластика.
     const top = Math.max(8, Math.min(tRect.top, window.innerHeight - 60));
     const right = Math.max(8, window.innerWidth - tRect.left + 8);
     menu.style.top = top + 'px';
     menu.style.right = right + 'px';
-    menu.style.maxHeight = Math.max(160, window.innerHeight - top - 12) + 'px';
+    const totalMax = Math.max(120, window.innerHeight - top - 12);
+    menu.style.maxHeight = totalMax + 'px';
+    // Внутренняя прокручиваемая область раньше считалась отдельной статичной
+    // CSS-формулой (calc(100vh - 260px)), не знавшей про это динамическое
+    // позиционирование — иногда расходилась с реальным доступным местом.
+    // Явно привязываем её к тому же расчёту, только за вычетом заголовка.
+    const header = menu.querySelector('.map-card-header');
+    const headerH = header ? header.getBoundingClientRect().height : 44;
+    const clip = menu.querySelector('.map-card-body-clip');
+    if (clip) clip.style.maxHeight = Math.max(100, totalMax - headerH) + 'px';
+}
+
+/** Содержимое окна «Ещё» может сильно вырасти (переход в редактирование/
+ * создание/объединение добавляет блок «Слой», кисть/ластик, толщину и т.д.)
+ * уже ПОСЛЕ того, как окно открыто — пересчитываем позицию/высоту и в этот
+ * момент тоже, а не только один раз при открытии. */
+function repositionMoreMenuIfOpen() {
+    if (document.getElementById('more-menu')?.classList.contains('active')) positionMoreMenu();
 }
 
 function setMoreMenuOpen(open) {
@@ -7001,6 +7090,10 @@ function toggleSegPanel() {
     if (!card) return;
     const collapsed = card.classList.toggle('collapsed');
     if (toggle) toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    // Сегментация сдвигает кнопки инструментов по вертикали (она выше них в
+    // столбце) — окну «Ещё», если оно открыто, нужно пересчитать позицию
+    // уже ПОСЛЕ анимации сворачивания/разворачивания (~0.18s), не раньше.
+    setTimeout(repositionMoreMenuIfOpen, 200);
 }
 
 /** Сворачивает/разворачивает всё окно «Ещё» целиком (список действий + панель

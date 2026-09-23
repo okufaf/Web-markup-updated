@@ -738,10 +738,14 @@ span.color-box { display: inline-block; border: 1.5px solid #e2e8f0; }
 .map-card-body {
     display: grid;
     grid-template-rows: 1fr;
-    transition: grid-template-rows 0.22s ease;
+    transition: grid-template-rows 0.18s ease;
 }
 .map-card.collapsed .map-card-body { grid-template-rows: 0fr; }
-.map-card-body-clip { overflow: hidden; min-height: 0; }
+/* contain — сворачивание/разворачивание (анимация grid-template-rows)
+   иначе на каждый кадр пересчитывает раскладку всей страницы, что и давало
+   заметное подтормаживание; так браузер считает раскладку только внутри
+   этого блока. */
+.map-card-body-clip { overflow: hidden; min-height: 0; contain: layout paint; }
 .map-card-body-inner { padding: 0 14px 14px; }
 
 .map-seg-row { display: flex; gap: 8px; margin-bottom: 8px; }
